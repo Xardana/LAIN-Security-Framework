@@ -90,7 +90,7 @@ By the final version, the project aims to include:
 * Safety validation for generated code before any remote execution
 * Restricted remote execution workflow via SSH
 * Logging of prompts, AI responses, and script results on the controller
-* Human-readable report generation
+* Final audit deliverable as a paginated PDF report including system profile, findings, evidence, and any referenced CVEs
 * Testing across authorized Windows and Linux lab machines
 * Documentation explaining the project design, risks, and limitations
 

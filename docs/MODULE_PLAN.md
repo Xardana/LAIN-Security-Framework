@@ -151,24 +151,27 @@ This module is important because AI-generated code should not be trusted blindly
 
 ## `src/report_writer.py`
 
-`report_writer.py` saves project output into readable files.
+`report_writer.py` is responsible for producing the **final PDF audit report** as well as supporting log files.
 
-It will save things such as:
+The final deliverable for each audit run is a properly paginated PDF document. It will include:
 
-* System profile results
-* AI prompts
-* AI responses
-* Validation results
-* Generated script metadata
-* Final audit reports
+* Cover page with target identifier, date, and audit run ID
+* System profile section (OS, version, architecture, privilege level, available tools)
+* Findings section, with one entry per discovered issue (severity, description, evidence from script output)
+* CVE section listing any CVE identifiers detected for software versions found on the target (e.g., outdated OpenSSH, kernel, services)
+* AI prompts and AI response appendix (for transparency and grading)
+* Validation results appendix (approved/rejected, blocked patterns, warnings)
+* Raw script output appendix
 
-It should support saving reports in formats such as:
+It will also expose helper functions used by `main.py`:
 
-* `.txt`
-* `.json`
-* possibly `.md` later
+* `extract_findings(script_output)` - parses the audit script output into structured findings
+* `extract_cves(script_output)` - extracts any CVE identifiers referenced in findings
+* `write_pdf_report(audit_data, output_path)` - generates the final paginated PDF
 
-This file helps prove what the tool did during testing. It also makes the project easier to grade because the instructor can see clear evidence of the workflow instead of guessing from terminal chaos.
+PDF generation should use a library such as `reportlab` or `fpdf2`. Logs and raw JSON dumps may also be saved alongside the PDF in `logs/` and `reports/` for traceability, but the PDF is the primary deliverable.
+
+This file helps prove what the tool did during testing and gives the reviewer a single, well-formatted document that summarizes the entire audit instead of terminal chaos.
 
 ---
 
@@ -205,7 +208,7 @@ report_writer.py
 6. The AI returns a proposed defensive audit script
 7. validator.py checks the generated script for unsafe behavior
 8. target_connector.py transfers and executes the approved script on the target
-9. report_writer.py saves all results, logs, and reports on the controller
+9. report_writer.py extracts findings and CVEs from script output, then generates a paginated PDF report on the controller
 ```
 
 ## Key Rule
