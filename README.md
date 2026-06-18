@@ -55,16 +55,17 @@ This project will not include:
 
 ## Planned Architecture
 
-The project will use a modular Python structure.
+The project will use a modular Python structure. All modules run on the **controller machine** (a safe, non-vulnerable machine). Target machines (vulnerable machines) are only reached over SSH — no framework code runs on them directly.
 
-1. The base Python controller runs on an authorized machine.
-2. The system profiler collects basic information about the local environment.
-3. The prompt builder formats the collected information into a structured AI prompt.
-4. The AI client sends the prompt to an AI API.
-5. The AI model returns a proposed machine-specific Python auditing script.
-6. The validator checks the generated script for unsafe behavior.
-7. Approved scripts may be saved or executed in a restricted test mode.
-8. Results are written to logs and reports.
+1. The base Python controller runs on an authorized, non-vulnerable machine.
+2. The target connector SSHes into the remote target machine and collects read-only system information.
+3. The system profiler parses the raw remote data into a structured profile on the controller.
+4. The prompt builder formats the structured profile into an AI prompt.
+5. The AI client sends the prompt to a local LLM API running on the controller.
+6. The AI model returns a proposed machine-specific Python auditing script.
+7. The validator checks the generated script for unsafe behavior before any execution.
+8. The target connector transfers and executes the approved script on the remote target machine.
+9. Results are written to logs and reports on the controller.
 
 ## Current Phase
 
@@ -83,11 +84,12 @@ No offensive functionality will be developed.
 
 By the final version, the project aims to include:
 
-* Basic Windows and Linux system profiling
-* AI-generated defensive auditing scripts
-* Safety validation for generated code
-* Restricted execution workflow
-* Logging of prompts, AI responses, and script results
+* SSH-based remote connection to target machines from a safe controller machine
+* Basic Windows and Linux system profiling collected remotely over SSH
+* AI-generated defensive auditing scripts tailored to each target's profile
+* Safety validation for generated code before any remote execution
+* Restricted remote execution workflow via SSH
+* Logging of prompts, AI responses, and script results on the controller
 * Human-readable report generation
 * Testing across authorized Windows and Linux lab machines
 * Documentation explaining the project design, risks, and limitations
@@ -131,6 +133,7 @@ adaptive-ai-system-auditor/
 │
 ├── src/
 │   ├── main.py
+│   ├── target_connector.py
 │   ├── system_profile.py
 │   ├── prompt_builder.py
 │   ├── ai_client.py
