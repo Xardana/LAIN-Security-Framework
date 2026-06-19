@@ -36,7 +36,7 @@ report_writer.py
 - **`prompt_builder.py`** — builds system prompt (AI role + safety rules) and user prompt (structured profile + audit request); does not contact the API
 - **`ai_client.py`** — sends prompts to local LLM API (on controller), parses response to structured JSON; API key loaded from environment variable only, never hardcoded
 - **`validator.py`** — checks AI-generated code for blocked patterns before any execution; returns `{"approved": bool, "issues": [...], "warnings": [...]}`
-- **`report_writer.py`** — saves system profiles, prompts, AI responses, validation results, and audit reports to `reports/`, `logs/`, and `generated_scripts/` on the controller
+- **`report_writer.py`** — produces the final **paginated PDF audit report** (cover page, system profile, findings, CVE section, appendices for prompts/AI response/validation/raw output) via `reportlab` or `fpdf2`; also exposes `extract_findings()` and `extract_cves()` helpers used by `main.py`. Supporting logs/JSON dumps may be saved to `reports/`, `logs/`, and `generated_scripts/` alongside the PDF
 
 ## Validator Blocked Patterns
 
