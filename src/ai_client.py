@@ -6,9 +6,11 @@ import json
 import os
 import re
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
-DEFAULT_BASE_URL = "http://192.168.1.103:11434/v1"
+load_dotenv()
+
 DEFAULT_MODEL = "huihui_ai/foundation-sec-abliterated"
 
 _client = None
@@ -17,7 +19,7 @@ _client = None
 def _get_client():
     global _client
     if _client is None:
-        base_url = os.environ.get("AI_API_BASE_URL", DEFAULT_BASE_URL)
+        base_url = os.environ["AI_API_BASE_URL"]
         # Local Ollama-served models don't check the key, but the OpenAI
         # client requires a non-empty string.
         api_key = os.environ.get("AI_API_KEY", "ollama")
