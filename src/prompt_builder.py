@@ -1,15 +1,24 @@
-"""Builds the text prompts sent to the local LLM. It does NOT contact the
-API (that is ai_client.py's job).
+"""
+prompt_builder.py
+=================
+Single responsibility: build the text prompts that get sent to the local LLM.
+It does NOT contact the API (that is ai_client.py's job) - it only assembles
+strings.
 
 Design notes:
 - The target model is small (~8B params), so prompts are kept short, direct,
-  and single-purpose. One audit task is asked per request rather than one
-  giant "check everything" prompt, which an 8B model handles poorly.
-- Every chunk is OS-aware. The same task carries a Linux hint and a Windows
-  hint; build() picks the right one from the profile so the rest of the
-  framework stays general across Windows and Linux targets.
-- Safety rules are repeated in the system prompt of every request because
-  small models drift from instructions over a conversation.
+  and single-purpose. One audit task is asked per request rather than one giant
+  "check everything" prompt, which an 8B model handles poorly.
+- Every task chunk is OS-aware. The same task carries a Linux hint and a Windows
+  hint; the builder picks the right one from the profile so the framework stays
+  general across Windows and Linux targets.
+- The safety rules are repeated in the system prompt of every request because
+  small models tend to drift from instructions over a long conversation.
+
+Coding requirements demonstrated in THIS file:
+    * Functions - each prompt-building step is its own def.
+    * Casting   - profile values are wrapped in str(...) before slicing/joining,
+                  so a missing or non-string field can never crash prompt building.
 """
 
 # --- System prompt chunks (role + hard safety rules + output contract) ---
@@ -114,10 +123,12 @@ AUDIT_TASKS = {
 def _platform(profile):
     """Return 'windows' or 'linux' for OS-specific prompt selection.
 
-    system_profile.parse() already normalizes the detected OS into a
-    'platform' field, so trust that authoritative value; only fall back to
-    sniffing the os string if the profile predates that field.
+    system_profile.parse() already normalizes the detected OS into a 'platform'
+    field, so we trust that authoritative value; we only fall back to sniffing
+    the raw os string if an older profile lacks that field.
     """
+    # [REQUIREMENT: Casting] str(...) guards against a missing/None field so
+    # .lower() always works, even before we know the value's real type.
     platform = str(profile.get("platform", "")).lower()
     if platform in ("linux", "windows"):
         return platform
@@ -133,43 +144,57 @@ def _profile_summary(profile):
     for field in fields:
         value = profile.get(field)
         if value:
+            # [REQUIREMENT: Casting] str(value) lets us safely .strip() and slice
+            # the value to 200 chars regardless of its original type.
             lines.append(f"- {field}: {str(value).strip()[:200]}")
     network = profile.get("network")
     if network:
         lines.append(f"- network interfaces: {', '.join(network)[:200]}")
     packages = profile.get("packages")
     if packages:
+        # Show only a count plus the first 15 names so the prompt stays small.
         sample = ", ".join(packages[:15])
         lines.append(f"- python packages ({len(packages)} installed): {sample[:200]}")
     return "\n".join(lines) if lines else "- (no profile details available)"
 
 
 def build_system_prompt():
-    """Assemble the system prompt from the reusable safety chunks."""
+    """Assemble the system prompt (role + safety rules + output contract).
+
+    These three reusable text chunks are joined into the "system" message that
+    is sent on every single request, so the model is always reminded of who it
+    is, what it must never do, and exactly what JSON shape to return.
+    """
     return "\n\n".join([ROLE, SAFETY_RULES, OUTPUT_CONTRACT])
 
 
 def task_keys():
-    """Return the list of audit task names the orchestrator should run."""
+    """Return the list of audit task names the orchestrator should run.
+
+    main.py loops over these keys, asking the model for one script per task.
+    """
     return list(AUDIT_TASKS.keys())
 
 
 def build_task_prompt(profile, task_key, feedback=None):
-    """Build a single small, focused user prompt for one audit task.
+    """Build the (system_prompt, user_prompt) pair for ONE audit task.
 
-    Returns (system_prompt, user_prompt). Use this to send one check per
-    request so each stays within a small model's reliable context.
+    This is the main function other modules call. Sending one task per request
+    keeps each prompt small enough for the 8B model to handle reliably.
 
-    feedback, when given, is the list of validator issues from a rejected
+    `feedback`, when given, is the list of validator issues from a rejected
     previous attempt; it is appended so the model knows what to fix on a retry.
     """
+    # Fail loudly on an unknown task name rather than silently building junk.
     if task_key not in AUDIT_TASKS:
         raise KeyError(f"Unknown audit task: {task_key}")
 
+    # Choose the Linux or Windows guidance based on the detected platform.
     platform = _platform(profile)
     task = AUDIT_TASKS[task_key]
     os_hint = LINUX_HINTS if platform == "linux" else WINDOWS_HINTS
 
+    # Assemble the user message piece by piece, then join with blank lines.
     parts = [
         "Target machine profile:\n" + _profile_summary(profile),
         os_hint,

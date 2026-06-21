@@ -1,18 +1,28 @@
-"""Checks AI-generated audit scripts for blocked behavior before anything is
-executed on a target, and drives a bounded regenerate-and-recheck loop.
+"""
+validator.py
+============
+Single responsibility: be the safety gate. It checks every AI-generated script
+for forbidden behaviour BEFORE the script is ever executed on a target, and it
+drives a bounded "ask the AI to try again" loop when a script is rejected.
 
-validate() is the gate: it never imports the LLM or touches the network, it
-just inspects script text and returns {"approved", "issues", "warnings"}.
+Two public functions:
+  * validate(script) is the gate itself - it never imports the LLM or touches
+    the network, it only inspects the script text and returns
+    {"approved", "issues", "warnings"}.
+  * validate_with_retries(generate) re-asks the model (feeding the validator's
+    complaints back in) until a script passes or DEFAULT_MAX_TRIES is reached.
+    If every attempt fails it returns an outcome flagged completed=False, so
+    report_writer can show a clear "could not complete" section instead of a
+    blank one.
 
-validate_with_retries() owns the retry policy the orchestrator wants: ask the
-AI again (with the validator's complaints fed back) until a script passes or
-DEFAULT_MAX_TRIES is reached. If every attempt fails it returns an outcome
-flagged completed=False so report_writer can render a clear "could not
-complete" section instead of a blank one.
+Coding requirements demonstrated in THIS file:
+    * Functions - the gate, the retry loop, and the helpers are all defs.
+    * Modules   - standard-library `re` compiles every blocked-pattern check.
 """
 
-import re
+import re        # standard library: compiled regular expressions do the matching
 
+# How many times validate_with_retries() will ask the model before giving up.
 DEFAULT_MAX_TRIES = 3
 
 # Separator between a command and its argument. Matches a plain space ("rm -rf")
@@ -83,38 +93,49 @@ _WARNING_SPECS = {
 
 
 def _compile(specs):
+    """Pre-compile each category's regex fragments into one pattern.
+
+    Joining the fragments with "|" means a single .search() per category checks
+    all of that category's banned constructs at once. Done once at import time.
+    """
     return [
         (category, description, re.compile("|".join(fragments), re.IGNORECASE))
         for category, (description, fragments) in specs.items()
     ]
 
 
+# Compiled once when the module is imported, then reused on every validate() call.
 _BLOCKED = _compile(_BLOCKED_SPECS)
 _WARNINGS = _compile(_WARNING_SPECS)
 
 
 def validate(script):
-    """Inspect a script and return {"approved", "issues", "warnings"}.
+    """Inspect one script and return {"approved", "issues", "warnings"}.
 
-    approved is True only when no blocked pattern matches. issues/warnings are
-    human-readable strings (also fed back to the model on a retry).
+    `approved` is True only when NO blocked pattern matches. `issues` (hard
+    rejections) and `warnings` (suspicious but allowed) are human-readable
+    strings that are also fed back to the model on a retry.
     """
     issues = []
     warnings = []
 
+    # An empty/blank script is never runnable, so reject it immediately.
     if not script or not script.strip():
         return {"approved": False, "issues": ["Empty script: nothing to run."], "warnings": []}
 
+    # Any blocked-category match is a hard rejection.
     for category, description, pattern in _BLOCKED:
         match = pattern.search(script)
         if match:
             issues.append(f"{category}: script {description} (matched '{match.group(0).strip()}').")
 
+    # Warning-category matches are recorded but do not block execution.
     for category, description, pattern in _WARNINGS:
         match = pattern.search(script)
         if match:
             warnings.append(f"{category}: script {description} (matched '{match.group(0).strip()}').")
 
+    # approved is True only when the issues list is empty.
     return {"approved": not issues, "issues": issues, "warnings": warnings}
 
 
@@ -134,19 +155,24 @@ def validate_with_retries(generate, max_tries=DEFAULT_MAX_TRIES):
     """
     attempt = None
     validation = {"approved": False, "issues": ["No attempt was generated."], "warnings": []}
-    feedback = None
+    feedback = None        # None on the first try; the issues list on later tries
 
     for attempt_no in range(1, max_tries + 1):
+        # Ask the orchestrator's callback for a fresh attempt (it calls the LLM).
         attempt = generate(feedback) or {}
         validation = validate(attempt.get("ai_response", {}).get("script", ""))
         if validation["approved"]:
+            # Passed - return straight away, recording which attempt succeeded.
             return _outcome(True, attempt_no, max_tries, attempt, validation)
+        # Failed - remember the complaints so the next prompt can include them.
         feedback = validation["issues"]
 
+    # Fell out of the loop: every attempt failed, so this task is not completed.
     return _outcome(False, max_tries, max_tries, attempt, validation)
 
 
 def _outcome(approved, attempts, max_tries, attempt, validation):
+    """Pack the loop's result into one consistent dict for main.py/report_writer."""
     attempt = attempt or {}
     return {
         "approved": approved,
