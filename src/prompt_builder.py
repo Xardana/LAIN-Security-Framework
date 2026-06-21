@@ -137,11 +137,19 @@ def build_system_prompt():
     return "\n\n".join([ROLE, SAFETY_RULES, OUTPUT_CONTRACT])
 
 
-def build_task_prompt(profile, task_key):
+def task_keys():
+    """Return the list of audit task names the orchestrator should run."""
+    return list(AUDIT_TASKS.keys())
+
+
+def build_task_prompt(profile, task_key, feedback=None):
     """Build a single small, focused user prompt for one audit task.
 
     Returns (system_prompt, user_prompt). Use this to send one check per
     request so each stays within a small model's reliable context.
+
+    feedback, when given, is the list of validator issues from a rejected
+    previous attempt; it is appended so the model knows what to fix on a retry.
     """
     if task_key not in AUDIT_TASKS:
         raise KeyError(f"Unknown audit task: {task_key}")
@@ -150,20 +158,17 @@ def build_task_prompt(profile, task_key):
     task = AUDIT_TASKS[task_key]
     os_hint = LINUX_HINTS if platform == "linux" else WINDOWS_HINTS
 
-    user_prompt = "\n\n".join([
+    parts = [
         "Target machine profile:\n" + _profile_summary(profile),
         os_hint,
         "Audit task: " + task["ask"],
         "Guidance: " + task[platform],
         "Write the read-only Python audit script for this one task now.",
-    ])
-    return build_system_prompt(), user_prompt
-
-
-def iter_task_prompts(profile, task_keys=None):
-    """Yield (task_key, system_prompt, user_prompt) for each requested task,
-    or all tasks if task_keys is None. Lets the orchestrator audit a target
-    one small chunk at a time."""
-    for key in (task_keys or AUDIT_TASKS.keys()):
-        system_prompt, user_prompt = build_task_prompt(profile, key)
-        yield key, system_prompt, user_prompt
+    ]
+    if feedback:
+        parts.append(
+            "Your previous attempt was REJECTED by the safety validator for:\n"
+            + "\n".join(f"- {issue}" for issue in feedback)
+            + "\nRewrite the script so it does none of these; keep it read-only."
+        )
+    return build_system_prompt(), "\n\n".join(parts)

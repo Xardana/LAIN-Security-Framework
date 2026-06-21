@@ -53,36 +53,54 @@ def main():
     }
 
     # Step 3-7: Audit one small, OS-specific task at a time. Each chunk is sent
-    # to the local LLM, validated, and only executed on the target if approved.
-    # Keeping requests per-task keeps each prompt small enough for the 8B model.
-    for task_key, system_prompt, user_prompt in prompt_builder.iter_task_prompts(profile):
+    # to the local LLM and must pass the validator before it ever runs on the
+    # target. If it fails, the validator asks the model to try again (up to its
+    # max); if all attempts fail, the task is recorded as not completed so the
+    # report shows why instead of leaving a blank section.
+    for task_key in prompt_builder.task_keys():
         print(f"\n[*] Task '{task_key}': requesting audit script from local LLM...")
-        ai_response = ai_client.send(system_prompt, user_prompt)
 
-        validation_result = validator.validate(ai_response.get("script", ""))
+        def generate(feedback, _task_key=task_key):
+            system_prompt, user_prompt = prompt_builder.build_task_prompt(
+                profile, _task_key, feedback=feedback
+            )
+            if feedback:
+                print(f"    retrying '{_task_key}' with validator feedback...")
+            return {
+                "system_prompt": system_prompt,
+                "user_prompt": user_prompt,
+                "ai_response": ai_client.send(system_prompt, user_prompt),
+            }
+
+        outcome = validator.validate_with_retries(generate)
+
         task_result = {
             "task": task_key,
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-            "ai_response": ai_response,
-            "validation": validation_result,
+            "system_prompt": outcome["system_prompt"],
+            "user_prompt": outcome["user_prompt"],
+            "ai_response": outcome["ai_response"],
+            "validation": outcome["validation"],
+            "attempts": outcome["attempts"],
+            "status": "completed" if outcome["approved"] else "failed_validation",
             "script_output": None,
             "findings": [],
             "cves": [],
         }
 
-        if not validation_result["approved"]:
-            print(f"[!] Task '{task_key}' script rejected by validator.")
-            for issue in validation_result["issues"]:
+        if not outcome["approved"]:
+            print(f"[!] Task '{task_key}' could not pass validation after "
+                  f"{outcome['attempts']} attempt(s); skipping execution.")
+            for issue in outcome["validation"]["issues"]:
                 print(f"    - {issue}")
             audit_data["tasks"].append(task_result)
             continue
 
-        print(f"[*] Task '{task_key}' script approved. Executing on target...")
+        print(f"[*] Task '{task_key}' approved on attempt {outcome['attempts']}. "
+              f"Executing on target...")
         script_output = target_connector.execute_script(
             host=args.target,
             username=args.user,
-            script=ai_response["script"],
+            script=outcome["ai_response"]["script"],
             key_path=args.key,
             password=ssh_password,
         )
@@ -98,11 +116,14 @@ def main():
     report_writer.write_pdf_report(audit_data, args.output)
 
     # Step 9: Print summary
-    approved = sum(1 for t in audit_data["tasks"] if t["validation"]["approved"])
+    tasks = audit_data["tasks"]
+    completed = sum(1 for t in tasks if t["status"] == "completed")
+    incomplete = len(tasks) - completed
     print("\n[+] Audit complete.")
     print(f"    Target   : {args.target}")
     print(f"    OS       : {profile.get('os', 'unknown')} ({profile.get('platform', 'unknown')})")
-    print(f"    Tasks    : {approved}/{len(audit_data['tasks'])} approved & run")
+    print(f"    Tasks    : {completed}/{len(tasks)} completed"
+          + (f", {incomplete} could not be completed" if incomplete else ""))
     print(f"    Findings : {len(audit_data['findings'])}")
     print(f"    CVEs     : {len(audit_data['cves'])}")
     print(f"[*] PDF report saved to: {args.output}")

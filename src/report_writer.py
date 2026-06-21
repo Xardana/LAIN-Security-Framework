@@ -237,11 +237,14 @@ def _render_profile(pdf, profile):
 def _render_summary(pdf, audit_data):
     findings = audit_data.get("findings", [])
     tasks = audit_data.get("tasks", [])
-    approved = sum(1 for t in tasks if t.get("validation", {}).get("approved"))
+    completed = sum(1 for t in tasks if t.get("status") == "completed")
+    incomplete = len(tasks) - completed
     counts = _severity_counts(findings)
 
     pdf.h2("Summary")
-    pdf.kv("Tasks run", f"{approved} approved & executed of {len(tasks)} attempted")
+    pdf.kv("Tasks completed", f"{completed} of {len(tasks)} attempted")
+    if incomplete:
+        pdf.kv("Not completed", f"{incomplete} (failed safety validation; see task sections)")
     pdf.kv("Total findings", str(len(findings)))
     pdf.kv("By severity", "  ".join(f"{s}={counts[s]}" for s in SEVERITIES))
     pdf.kv("CVEs referenced", str(len(audit_data.get("cves", []))))
@@ -250,17 +253,28 @@ def _render_summary(pdf, audit_data):
 def _render_task(pdf, task):
     name = task.get("task", "unnamed task")
     validation = task.get("validation", {}) or {}
+    completed = task.get("status") == "completed"
+    attempts = task.get("attempts", 1)
     pdf.h2(f"Task: {name}")
 
-    if not validation.get("approved", False):
+    if not completed:
+        # Explicit "could not complete" block so the section is never blank.
         pdf.set_text_color(150, 30, 30)
-        pdf.body("Status: REJECTED by validator - not executed on target.")
+        pdf.set_font("Helvetica", "B", 10)
+        pdf.multi_cell(0, 6, _safe("NOT COMPLETED"),
+                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(20, 20, 20)
+        pdf.body(
+            f"The AI-generated script failed safety validation on all "
+            f"{attempts} attempt(s), so it was never executed on the target. "
+            f"Validator objections from the final attempt:"
+        )
         for issue in validation.get("issues", []):
             pdf.body(f"  - {issue}")
         return
 
     findings = task.get("findings", [])
-    pdf.body(f"Status: approved and executed. {len(findings)} finding(s).")
+    pdf.body(f"Status: completed on attempt {attempts}. {len(findings)} finding(s).")
     pdf.ln(1)
 
     if not findings:
