@@ -147,27 +147,3 @@ def iter_task_prompts(profile, task_keys=None):
     for key in (task_keys or AUDIT_TASKS.keys()):
         system_prompt, user_prompt = build_task_prompt(profile, key)
         yield key, system_prompt, user_prompt
-
-
-def build(profile):
-    """Backward-compatible single-prompt entry point used by main.py.
-
-    Returns (system_prompt, user_prompt) covering the full audit task list as
-    a compact checklist. For an 8B model, prefer iter_task_prompts() to ask one
-    chunk at a time; this combined form is the convenience/default path.
-    """
-    platform = _platform(profile)
-    os_hint = LINUX_HINTS if platform == "linux" else WINDOWS_HINTS
-
-    checklist = "\n".join(
-        f"{i}. {task['ask']} ({task[platform]})"
-        for i, task in enumerate(AUDIT_TASKS.values(), 1)
-    )
-    user_prompt = "\n\n".join([
-        "Target machine profile:\n" + _profile_summary(profile),
-        os_hint,
-        "Produce ONE read-only Python audit script that performs these checks:",
-        checklist,
-        "Keep it compact and make each check independent.",
-    ])
-    return build_system_prompt(), user_prompt
