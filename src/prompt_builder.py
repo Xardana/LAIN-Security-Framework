@@ -29,12 +29,32 @@ SAFETY_RULES = (
     "- If a check would require any of the above, skip it and note why instead."
 )
 
+# The exact JSON shape every generated script must print to stdout. Keeping
+# this fixed lets report_writer.py render one standardized PDF template for
+# every task without guessing at free-form text.
+FINDINGS_SCHEMA = (
+    "{\n"
+    '  "task": "<this task name>",\n'
+    '  "findings": [\n'
+    '    {"title": "<short title>",\n'
+    '     "severity": "info|low|medium|high|critical",\n'
+    '     "detail": "<what was found, one or two sentences>",\n'
+    '     "evidence": "<the raw value or command output it is based on>",\n'
+    '     "cves": ["CVE-0000-0000"]}\n'
+    "  ]\n"
+    "}\n"
+    "Rules for this output: use an empty findings list when nothing notable is "
+    "found; severity must be exactly one of the listed words; include cves only "
+    "when a specific CVE applies, otherwise use an empty list."
+)
+
 OUTPUT_CONTRACT = (
-    "Return ONLY a JSON object, no prose, in this exact shape:\n"
+    "Reply with ONLY a JSON object, no prose, in this exact shape:\n"
     '{"script": "<python3 source>", "explanation": "<one sentence>"}\n'
-    "The script must run under python3, print human-readable findings to stdout, "
-    "use only the standard library, and wrap every check in try/except so one "
-    "failure never stops the rest."
+    "The script must run under python3, use only the standard library, and wrap "
+    "every check in try/except so one failure never stops the rest. The script "
+    "must print EXACTLY ONE JSON object to stdout and nothing else, in this "
+    "shape:\n" + FINDINGS_SCHEMA
 )
 
 # --- Per-OS guidance chunks ---
