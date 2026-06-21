@@ -1,6 +1,5 @@
 import argparse
 import os
-import sys
 
 import target_connector
 import system_profile
@@ -38,66 +37,74 @@ def main():
         password=ssh_password,
     )
 
-    # Step 2: Parse raw remote data into a structured profile
+    # Step 2: Parse raw remote data into a structured profile. This also
+    # decides the target platform (linux/windows), which drives OS-correct
+    # prompt selection below.
     profile = system_profile.parse(raw_data)
-    print(f"[*] System profile collected: {profile.get('os', 'unknown')} / {profile.get('arch', 'unknown')}")
-
-    # Step 3: Build prompts from the structured profile
-    system_prompt, user_prompt = prompt_builder.build(profile)
-
-    # Step 4: Send prompts to local LLM API and receive generated script
-    print("[*] Sending profile to local LLM API...")
-    ai_response = ai_client.send(system_prompt, user_prompt)
-
-    # Step 5: Validate the generated script before any execution
-    print("[*] Validating generated script...")
-    validation_result = validator.validate(ai_response.get("script", ""))
+    print(f"[*] System profile collected: {profile.get('os', 'unknown')} "
+          f"/ {profile.get('arch', 'unknown')} ({profile.get('platform', 'unknown')})")
 
     audit_data = {
         "target": args.target,
         "profile": profile,
-        "system_prompt": system_prompt,
-        "user_prompt": user_prompt,
-        "ai_response": ai_response,
-        "validation": validation_result,
+        "tasks": [],
         "findings": [],
         "cves": [],
-        "script_output": None,
     }
 
-    if not validation_result["approved"]:
-        print("[!] Script rejected by validator.")
-        for issue in validation_result["issues"]:
-            print(f"    - {issue}")
-        report_writer.write_pdf_report(audit_data, args.output)
-        print(f"[*] Rejection logged. PDF report saved to {args.output}")
-        sys.exit(0)
+    # Step 3-7: Audit one small, OS-specific task at a time. Each chunk is sent
+    # to the local LLM, validated, and only executed on the target if approved.
+    # Keeping requests per-task keeps each prompt small enough for the 8B model.
+    for task_key, system_prompt, user_prompt in prompt_builder.iter_task_prompts(profile):
+        print(f"\n[*] Task '{task_key}': requesting audit script from local LLM...")
+        ai_response = ai_client.send(system_prompt, user_prompt)
 
-    print("[*] Script approved. Executing on target...")
+        validation_result = validator.validate(ai_response.get("script", ""))
+        task_result = {
+            "task": task_key,
+            "system_prompt": system_prompt,
+            "user_prompt": user_prompt,
+            "ai_response": ai_response,
+            "validation": validation_result,
+            "script_output": None,
+            "findings": [],
+            "cves": [],
+        }
 
-    # Step 6: Transfer and execute the validated script on the target
-    script_output = target_connector.execute_script(
-        host=args.target,
-        username=args.user,
-        key_path=args.key,
-        password=ssh_password,
-        script=ai_response["script"],
-    )
-    audit_data["script_output"] = script_output
+        if not validation_result["approved"]:
+            print(f"[!] Task '{task_key}' script rejected by validator.")
+            for issue in validation_result["issues"]:
+                print(f"    - {issue}")
+            audit_data["tasks"].append(task_result)
+            continue
 
-    # Step 7: Extract structured findings and any referenced CVEs from script output
-    audit_data["findings"] = report_writer.extract_findings(script_output)
-    audit_data["cves"] = report_writer.extract_cves(script_output)
+        print(f"[*] Task '{task_key}' script approved. Executing on target...")
+        script_output = target_connector.execute_script(
+            host=args.target,
+            username=args.user,
+            script=ai_response["script"],
+            key_path=args.key,
+            password=ssh_password,
+        )
+        task_result["script_output"] = script_output
+        task_result["findings"] = report_writer.extract_findings(script_output)
+        task_result["cves"] = report_writer.extract_cves(script_output)
+
+        audit_data["findings"].extend(task_result["findings"])
+        audit_data["cves"].extend(task_result["cves"])
+        audit_data["tasks"].append(task_result)
 
     # Step 8: Generate the final PDF report with full pagination, findings, and CVEs
     report_writer.write_pdf_report(audit_data, args.output)
 
     # Step 9: Print summary
+    approved = sum(1 for t in audit_data["tasks"] if t["validation"]["approved"])
     print("\n[+] Audit complete.")
-    print(f"    Target  : {args.target}")
-    print(f"    OS      : {profile.get('os', 'unknown')}")
-    print(f"    Findings: {len(audit_data['findings'])}")
-    print(f"    CVEs    : {len(audit_data['cves'])}")
+    print(f"    Target   : {args.target}")
+    print(f"    OS       : {profile.get('os', 'unknown')} ({profile.get('platform', 'unknown')})")
+    print(f"    Tasks    : {approved}/{len(audit_data['tasks'])} approved & run")
+    print(f"    Findings : {len(audit_data['findings'])}")
+    print(f"    CVEs     : {len(audit_data['cves'])}")
     print(f"[*] PDF report saved to: {args.output}")
 
 

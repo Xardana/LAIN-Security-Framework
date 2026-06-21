@@ -89,9 +89,16 @@ AUDIT_TASKS = {
 
 
 def _platform(profile):
-    """Return 'windows' or 'linux' from the parsed profile, defaulting to linux."""
-    value = str(profile.get("platform") or profile.get("os") or "").lower()
-    return "windows" if "win" in value else "linux"
+    """Return 'windows' or 'linux' for OS-specific prompt selection.
+
+    system_profile.parse() already normalizes the detected OS into a
+    'platform' field, so trust that authoritative value; only fall back to
+    sniffing the os string if the profile predates that field.
+    """
+    platform = str(profile.get("platform", "")).lower()
+    if platform in ("linux", "windows"):
+        return platform
+    return "windows" if "win" in str(profile.get("os", "")).lower() else "linux"
 
 
 def _profile_summary(profile):
