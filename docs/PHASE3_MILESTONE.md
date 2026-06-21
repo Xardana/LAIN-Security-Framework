@@ -8,6 +8,8 @@
 
 ## SECTION 1: System Flowchart (Mermaid.js)
 
+> Diagram source: [`phase3_flowchart.mmd`](phase3_flowchart.mmd) (standalone Mermaid file). The block below is a rendered copy kept inline for self-contained submission.
+
 ```mermaid
 flowchart TD
     %% ============ CURRENT FUNCTIONAL ELEMENTS (Phase 2 — working now) ============

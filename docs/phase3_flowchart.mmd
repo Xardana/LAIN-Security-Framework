@@ -1,0 +1,62 @@
+flowchart TD
+    %% ============ CURRENT FUNCTIONAL ELEMENTS (Phase 2 — working now) ============
+    A["CLI Entry: main.py<br/>argument parsing · exit codes · stderr"]
+    B["target_connector.py<br/>SSH connect · agent-first auth"]
+    C["collect_system_info<br/>read-only enumeration<br/>Linux and Windows"]
+    D["system_profile.parse<br/>structured profile + platform detection"]
+    E{"Loop: for each of<br/>6 audit tasks"}
+    F["prompt_builder.build_task_prompt<br/>OS-aware chunk + safety rules + JSON contract"]
+    G["ai_client.send<br/>OpenAI library client"]
+    H[("Local LLM<br/>foundation-sec 8B<br/>192.168.1.103 via .env")]
+    I["validator.validate<br/>8 blocked-pattern categories"]
+    J{"Approved?"}
+    L["target_connector.execute_script<br/>SSH run on target · temp file · auto-cleanup"]
+    M["report_writer.extract_findings<br/>extract_cves · JSON parse"]
+    RES[("Per-task result<br/>status · findings · CVEs")]
+    N["report_writer<br/>save_run_log JSON +<br/>save_generated_scripts"]
+    O["write_pdf_report<br/>paginated PDF · fpdf2"]
+
+    A --> B --> C --> D --> E
+    E -->|"per task"| F --> G --> H --> I --> J
+    J -->|"rejected: feedback retry, max 3"| F
+    J -->|"approved"| L --> M --> RES
+    J -->|"3 failures: mark NOT COMPLETED"| RES
+    RES --> E
+    E ==>|"all tasks complete"| N
+    N --> O
+
+    %% ============ PHASE 3 — FINAL SHOWCASE (future scope) ============
+    subgraph PHASE3["★ PHASE 3 — FINAL SHOWCASE  (Future Scope / Not Yet Built)"]
+        direction TB
+        TEST["Automated pytest suite +<br/>validator adversarial corpus"]
+        HARD["SSH host-key pinning<br/>(replace AutoAddPolicy)"]
+        PKG["PyInstaller build<br/>dai_audit.spec · clean venv"]
+        EXE[/"Windows .exe artifact"/]
+        ELF[/"Linux ELF artifact"/]
+        PROX["Proxmox VM deployment<br/>same subnet as local LLM"]
+        LIVE["Live end-to-end validation<br/>real target + real model"]
+
+        TEST --> PKG
+        HARD --> PKG
+        PKG --> EXE
+        PKG --> ELF
+        EXE --> PROX
+        ELF --> PROX
+        PROX --> LIVE
+    end
+
+    O ==> PKG
+    TEST -.->|"covers all src/ modules"| I
+
+    %% ============ STYLING ============
+    classDef current fill:#e8f0fe,stroke:#1a3d7c,stroke-width:1px,color:#10243e;
+    classDef store fill:#eef6ee,stroke:#1f6b1f,stroke-width:1px,color:#10331a;
+    classDef future fill:#fff4e5,stroke:#b35900,stroke-width:3px,stroke-dasharray:6 4,color:#5a3000;
+    classDef artifact fill:#fdeaea,stroke:#a40000,stroke-width:3px,stroke-dasharray:6 4,color:#5a0000;
+
+    class A,B,C,D,E,F,G,I,J,L,M,N,O current;
+    class H,RES store;
+    class TEST,HARD,PKG,PROX,LIVE future;
+    class EXE,ELF artifact;
+
+    style PHASE3 fill:#fff8ec,stroke:#b35900,stroke-width:2px,stroke-dasharray:6 4,color:#5a3000;
