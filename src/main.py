@@ -112,10 +112,17 @@ def main():
         audit_data["cves"].extend(task_result["cves"])
         audit_data["tasks"].append(task_result)
 
-    # Step 8: Generate the final PDF report with full pagination, findings, and CVEs
+    # Step 8: Persist artifacts for auditability and manual review - a JSON log
+    # of everything collected and generated, plus each generated script on disk.
+    log_path = report_writer.save_run_log(audit_data)
+    script_paths = report_writer.save_generated_scripts(audit_data)
+    print(f"\n[*] Run log saved to: {log_path}")
+    print(f"[*] Saved {len(script_paths)} generated script(s) to generated_scripts/")
+
+    # Step 9: Generate the final PDF report with full pagination, findings, and CVEs
     report_writer.write_pdf_report(audit_data, args.output)
 
-    # Step 9: Print summary
+    # Step 10: Print summary
     tasks = audit_data["tasks"]
     completed = sum(1 for t in tasks if t["status"] == "completed")
     incomplete = len(tasks) - completed

@@ -15,16 +15,19 @@ Design notes:
 # --- System prompt chunks (role + hard safety rules + output contract) ---
 
 ROLE = (
-    "You are a defensive security auditor. You write small, READ-ONLY Python "
-    "scripts that inspect a single authorized machine and report findings. "
-    "You only audit; you never change the system."
+    "You are a defensive security auditor working on an explicitly authorized, "
+    "read-only audit. You write small READ-ONLY Python scripts that inspect a "
+    "single authorized machine and report findings. You only audit; you never "
+    "change the system and you never produce exploit code."
 )
 
 SAFETY_RULES = (
     "Hard rules, never break them:\n"
     "- READ-ONLY only. Never write, move, delete, or modify any file or setting.\n"
-    "- No privilege escalation, no sudo/runas, no credential or token or cookie reading.\n"
-    "- No persistence, no new users, no network connections to other hosts.\n"
+    "- No exploitation or exploit code, and no destructive actions of any kind.\n"
+    "- No privilege escalation, no sudo/runas, no credential, token, key, or cookie reading.\n"
+    "- No persistence, no new users, and no stealth or evasion techniques.\n"
+    "- No unauthorized network scanning and no connections to other hosts.\n"
     "- No disabling of security tools. No eval/exec of downloaded code.\n"
     "- If a check would require any of the above, skip it and note why instead."
 )
@@ -122,13 +125,22 @@ def _platform(profile):
 
 
 def _profile_summary(profile):
-    """Compact, model-friendly summary of the target. Kept short on purpose."""
-    fields = ("os", "os_release", "arch", "python_version", "tools")
+    """Compact, model-friendly summary of the target. Kept short on purpose:
+    interface names and a package count/sample are included, but the full
+    package list is left out so the prompt stays small for an 8B model."""
+    fields = ("os", "os_release", "arch", "python_version", "privilege", "tools")
     lines = []
     for field in fields:
         value = profile.get(field)
         if value:
             lines.append(f"- {field}: {str(value).strip()[:200]}")
+    network = profile.get("network")
+    if network:
+        lines.append(f"- network interfaces: {', '.join(network)[:200]}")
+    packages = profile.get("packages")
+    if packages:
+        sample = ", ".join(packages[:15])
+        lines.append(f"- python packages ({len(packages)} installed): {sample[:200]}")
     return "\n".join(lines) if lines else "- (no profile details available)"
 
 

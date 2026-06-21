@@ -26,6 +26,7 @@ UNIX_COMMANDS = {
     "whoami": "whoami",
     "network": "ip addr 2>/dev/null || ifconfig 2>/dev/null",
     "tools": "for t in python3 python powershell bash ip ifconfig; do command -v $t; done",
+    "packages": "python3 -m pip list 2>/dev/null || pip3 list 2>/dev/null || pip list 2>/dev/null",
 }
 
 WINDOWS_COMMANDS = {
@@ -38,6 +39,7 @@ WINDOWS_COMMANDS = {
     "whoami": "whoami",
     "network": "ipconfig /all",
     "tools": "for %t in (python python3 powershell) do where %t 2>nul",
+    "packages": "python -m pip list 2>nul || pip list 2>nul",
 }
 
 

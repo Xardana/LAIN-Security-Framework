@@ -232,6 +232,13 @@ def _render_profile(pdf, profile):
         pdf.kv(label, profile.get(key, "-"))
     tools = profile.get("tools") or []
     pdf.kv("Tools", ", ".join(tools) if tools else "-")
+    network = profile.get("network") or []
+    pdf.kv("Network", ", ".join(network) if network else "-")
+    packages = profile.get("packages") or []
+    if packages:
+        pdf.kv("Python packages", f"{len(packages)} installed: " + ", ".join(packages))
+    else:
+        pdf.kv("Python packages", "-")
 
 
 def _render_summary(pdf, audit_data):
@@ -345,3 +352,46 @@ def write_pdf_report(audit_data, output_path):
 
     pdf.output(output_path)
     return output_path
+
+
+# --------------------------------------------------------------------------
+# Logging / saving generated output (auditability + manual review)
+# --------------------------------------------------------------------------
+
+def _slug(value):
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(value)) or "target"
+
+
+def _timestamp():
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def save_run_log(audit_data, log_dir="logs"):
+    """Write the full run (collected profile + every prompt, AI response,
+    validation result, and script output) as a timestamped JSON log so there is
+    a durable record of exactly what was collected and what the AI produced."""
+    os.makedirs(log_dir, exist_ok=True)
+    path = os.path.join(
+        log_dir, f"audit_{_slug(audit_data.get('target'))}_{_timestamp()}.json")
+    with open(path, "w", encoding="utf-8") as handle:
+        json.dump(audit_data, handle, indent=2, default=str)
+    return path
+
+
+def save_generated_scripts(audit_data, scripts_dir="generated_scripts"):
+    """Save each AI-generated script to its own file for manual review/audit.
+    The validation status is in the filename so rejected scripts are obvious
+    and are never confused with approved ones."""
+    os.makedirs(scripts_dir, exist_ok=True)
+    timestamp = _timestamp()
+    saved = []
+    for task in audit_data.get("tasks", []):
+        script = (task.get("ai_response") or {}).get("script")
+        if not script:
+            continue
+        name = f"{_slug(task.get('task'))}_{task.get('status', 'unknown')}_{timestamp}.py"
+        path = os.path.join(scripts_dir, name)
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(script)
+        saved.append(path)
+    return saved
