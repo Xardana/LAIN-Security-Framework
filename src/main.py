@@ -24,10 +24,9 @@ def parse_args():
 def main():
     args = parse_args()
 
+    # Auth is agent-first (ssh-agent / Pageant) by default; --key and
+    # SSH_PASSWORD are optional fallbacks for machines without agent access.
     ssh_password = os.environ.get("SSH_PASSWORD")
-    if not args.key and not ssh_password:
-        print("[ERROR] Provide an SSH key via --key or set SSH_PASSWORD environment variable.")
-        sys.exit(1)
 
     print(f"[*] Starting audit of target: {args.target}")
 
