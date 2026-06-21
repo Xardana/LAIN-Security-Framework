@@ -38,28 +38,52 @@ flowchart TD
     E ==>|"all tasks complete"| N
     N --> O
 
-    %% ============ PHASE 3 — FINAL SHOWCASE (future scope) ============
-    subgraph PHASE3["★ PHASE 3 — FINAL SHOWCASE  (Future Scope / Not Yet Built)"]
+    %% ============ PHASE 3 — FINAL SHOWCASE: ADAPTIVE AUDITING FRAMEWORK ============
+    subgraph PHASE3["★ PHASE 3 — FINAL SHOWCASE · Adaptive Auditing Framework (Not Yet Built)"]
         direction TB
-        TEST["Automated pytest suite +<br/>validator adversarial corpus"]
-        HARD["SSH host-key pinning<br/>(replace AutoAddPolicy)"]
-        PKG["PyInstaller build<br/>dai_audit.spec · clean venv"]
-        EXE[/"Windows .exe artifact"/]
-        ELF[/"Linux ELF artifact"/]
-        PROX["Proxmox VM deployment<br/>same subnet as local LLM"]
-        LIVE["Live end-to-end validation<br/>real target + real model"]
 
-        TEST --> PKG
-        HARD --> PKG
-        PKG --> EXE
-        PKG --> ELF
-        EXE --> PROX
-        ELF --> PROX
-        PROX --> LIVE
+        subgraph ADAPT["1 · Adaptive Script Generation"]
+            direction TB
+            AG1["OS-tier routing<br/>distinct Windows vs Linux script categories"]
+            AG2["Resource-tier routing<br/>lightweight checks on low-memory hosts,<br/>detailed checks on powerful hosts"]
+            AG3["Script category chosen dynamically<br/>from the system profile"]
+            AG1 --> AG3
+            AG2 --> AG3
+        end
+
+        subgraph VALID["2 · Enhanced Validation and Sandbox"]
+            direction TB
+            EV1["Restricted-action scan<br/>(expanded categories)"]
+            EV2["Imported-module review<br/>allowlist"]
+            EV3["File-system access limits"]
+            EV4["Manual confirmation<br/>before execution"]
+            EV5[("Temporary workspace<br/>isolate · log · delete after test")]
+            EV1 --> EV2 --> EV3 --> EV4 --> EV5
+        end
+
+        subgraph REPORT["3 · Explainable Reporting"]
+            direction TB
+            ER1["Reasoning section<br/>why this script fits this machine"]
+            ER2["Narrative: info collected · script type<br/>· checks performed · results found"]
+            ER1 --> ER2
+        end
+
+        subgraph LAB["4 · Lab Testing and Deliverables"]
+            direction TB
+            LT1["Authorized lab VMs<br/>at least 1 Windows + 1 Linux"]
+            LT2["Cross-OS comparison<br/>AI-generated vs static-script relevance"]
+            LT3[/"Deliverables bundle<br/>source · sample scripts · logs/reports<br/>· docs · security and ethics discussion"/]
+            LT1 --> LT2 --> LT3
+        end
     end
 
-    O ==> PKG
-    TEST -.->|"covers all src/ modules"| I
+    %% --- how Phase 3 work extends the current pipeline (dotted = enhances) ---
+    D -.->|"profile drives tier/category"| ADAPT
+    ADAPT -.->|"selected script category"| F
+    VALID -.->|"hardens the gate"| I
+    EV5 -.->|"sandbox for"| L
+    REPORT -.->|"enriches"| O
+    O -.->|"runs feed the comparison"| LAB
 
     %% ============ STYLING ============
     classDef current fill:#e8f0fe,stroke:#1a3d7c,stroke-width:1px,color:#10243e;
@@ -69,61 +93,64 @@ flowchart TD
 
     class A,B,C,D,E,F,G,I,J,L,M,N,O current;
     class H,RES store;
-    class TEST,HARD,PKG,PROX,LIVE future;
-    class EXE,ELF artifact;
+    class AG1,AG2,AG3,EV1,EV2,EV3,EV4,EV5,ER1,ER2,LT1,LT2 future;
+    class LT3 artifact;
 
     style PHASE3 fill:#fff8ec,stroke:#b35900,stroke-width:2px,stroke-dasharray:6 4,color:#5a3000;
+    style ADAPT fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style VALID fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style REPORT fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style LAB fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
 ```
 
-**Legend.** Solid blue boxes = **Current Functional Elements** (working in Phase 2). Green cylinders = current data stores/results. The dashed amber `★ PHASE 3` subgraph = **Final Showcase scope**; nodes there carry thick dashed borders, and the two distribution artifacts (`.exe` / ELF) are styled in dashed red to mark them as the headline deliverables.
+**Legend.** Solid blue boxes = **Current Functional Elements** (working in Phase 2). Green cylinders = current data stores/results. The dashed amber `★ PHASE 3` subgraph groups the Final-Showcase scope into four clusters — *Adaptive Script Generation, Enhanced Validation and Sandbox, Explainable Reporting,* and *Lab Testing and Deliverables* — each with thick dashed borders. Dotted edges show how each cluster extends a specific current pipeline stage, and the dashed-red node marks the final deliverables bundle.
 
 ---
 
 ## SECTION 2: Phase 3 (Final Showcase) Deliverables
 
-The Phase 2 foundation (collection → prompting → generation → validation → execution → reporting) is functionally complete. Phase 3 converts that working pipeline into a **distributable, independently verified, production-deployed** tool. Each deliverable below states the feature, its precise scope, and its explicit Definition of Done (DoD).
+The Phase 2 foundation (collection → prompting → generation → validation → execution → reporting) is functionally complete. Phase 3 evolves it from a fixed six-task auditor into an **adaptive auditing framework**: it tailors the generated scripts to each machine, validates and sandboxes them more strictly, explains its own reasoning, and is proven across a multi-OS lab. Each deliverable below states the feature, its precise scope, and its explicit Definition of Done (DoD).
 
-### Core Architecture
+### 1 · Adaptive Script Generation
 
-- **Single-file standalone executables (Windows `.exe` + Linux ELF).** The complete controller — `main.py` plus all six `src/` modules and their third-party dependencies — will be bundled into one self-contained binary per operating system using a committed `dai_audit.spec` PyInstaller specification and per-OS build scripts.
-  - *Done when:* the binary launches and runs a complete audit on a host that has **no** Python interpreter and **no** `pip`-installed packages, on both a clean Windows machine and a clean Linux machine.
-- **Embedded dependency bundling.** All runtime libraries (`openai`, `paramiko`, `python-dotenv`, `fpdf2`) will be packaged inside the binary so the end user installs nothing manually.
-  - *Done when:* a dependency inspection of the artifact confirms no external Python runtime is required, and the binary reaches `--help` and a successful run with only the artifact and a `.env` file present.
-- **Externalized configuration boundary.** The local LLM address, model name, and credentials will remain in an external `.env` file that is read at runtime and never compiled into the binary.
-  - *Done when:* string inspection of the shipped artifact contains no LLM IP address or key, and the same binary connects successfully after only the external `.env` value is changed.
+- **Operating-system script categories.** The framework will select a different category of defensive audit script depending on the detected OS, so a Windows target and a Linux target receive genuinely different generated code rather than the same checks reshaped.
+  - *Done when:* for one identical audit objective, a Windows target and a Linux target produce demonstrably different generated scripts (distinct commands/cmdlets and checks), captured side by side from real runs.
+- **Resource-tier adaptation.** The framework will scale the depth of the generated script to the host's capacity: a memory-constrained machine receives a lightweight script, while a more powerful machine receives a more detailed, thorough script.
+  - *Done when:* a documented mapping from profile metrics (memory, CPU) to a "lightweight" or "detailed" tier is implemented, and two runs — one low-resource profile, one high-resource profile — yield a reduced-scope and an expanded-scope script respectively.
+- **Profile-driven dynamic routing.** The chosen script category will be derived at runtime from the structured `system_profile`, not hard-coded, so the selection is a direct function of what the tool discovered about the machine.
+  - *Done when:* the category-selection logic reads only from the parsed profile, and altering a profile field (OS or resource tier) provably changes the category of script that is requested.
+- **Demonstrated advantage over static scripts.** The deliverable will articulate why AI-assisted dynamic generation is superior to a single static script run everywhere.
+  - *Done when:* a written comparison shows, with concrete examples, that the adaptively generated scripts are more relevant to each machine than one fixed static script executed on both operating systems.
 
-### Data Flow / Logic
+### 2 · Enhanced Validation and Sandboxed Execution
 
-- **Live end-to-end pipeline execution.** The full sequence — SSH enumeration, structured profiling, per-task prompt generation, LLM response, safety validation, on-target execution, and report assembly — will be exercised end to end against a real LLM and a real target rather than simulated fixtures.
-  - *Done when:* one invocation against a live target produces a real JSON run log and a real PDF in which at least one task reaches `completed` status and the report contains findings parsed from genuine target output.
-- **Verified retry-and-recover behavior under real model output.** The `validate_with_retries` loop (maximum three attempts, validator objections fed back into the prompt) will be demonstrated against authentic 8B-model responses, including at least one task that is corrected on a retry and one that exhausts its attempts.
-  - *Done when:* a single live run yields a report containing both a task `completed on attempt 2 or 3` and a task rendered in the explicit `NOT COMPLETED` block with its validator objections listed.
-- **Standardized findings contract validated against live output.** Every executed script will emit the fixed findings JSON schema, and `extract_findings`/`extract_cves` will populate the report's severity summary and consolidated CVE section directly from that schema.
-  - *Done when:* the generated PDF's severity table and "Referenced CVEs" section are populated exclusively from parsed live findings, with zero free-text fallback entries for the completed tasks.
+- **Restricted-action scanning.** Every generated script will be scanned for restricted actions before any execution, extending the existing eight-category blocked-pattern validator.
+  - *Done when:* a fixed corpus of scripts containing restricted actions is rejected with the matched action named, and no script reaches a target without first passing this scan.
+- **Imported-module review.** The validator will inspect the modules a generated script imports and reject anything outside an explicit allowlist of safe, read-only modules.
+  - *Done when:* a script importing a module not on the allowlist is rejected, and the report identifies the disallowed module by name.
+- **File-system access limiting.** Generated scripts will be constrained to read-only behaviour and a designated workspace, preventing writes or modifications outside that boundary.
+  - *Done when:* a generated script that attempts to write or modify a file outside the permitted workspace is blocked before execution.
+- **Manual confirmation gate.** The tool will require explicit operator confirmation before any generated script is executed on a target.
+  - *Done when:* a run halts and waits for an affirmative confirmation, and no generated script executes if confirmation is withheld.
+- **Temporary, isolated workspace.** Generated scripts will be written into a temporary workspace that isolates them for easy review, logs them, and deletes them after testing.
+  - *Done when:* each run places its generated scripts in an isolated temporary workspace, records them in the run log, and removes them on completion, with the workspace location reported to the operator.
 
-### Infrastructure / Security
+### 3 · Explainable Reporting
 
-- **Proxmox VM deployment on the LLM subnet.** The packaged controller will be deployed on a dedicated Proxmox virtual machine that resides on the same network segment as the local LLM host (`192.168.1.103`), so model access is direct and contained.
-  - *Done when:* the binary running on the Proxmox VM completes a full audit while reaching the LLM over the local network, with no external/internet egress required.
-- **SSH host-key verification hardening.** The connection policy will be tightened from automatic host-key acceptance (`AutoAddPolicy`) to verification against a known-hosts store, so a target's identity is confirmed before any command or script is sent.
-  - *Done when:* a connection to an unknown/changed host key is refused with a clear error, and a connection to a pre-registered host key succeeds.
-- **Enforced read-only execution guarantee.** The validator's eight blocked-action categories (file deletion, file writes, credential access, privilege escalation, persistence, security-tool disabling, dynamic code execution, outbound network) will gate every script, and no script will ever reach the target without passing.
-  - *Done when:* a code path audit confirms `execute_script` is unreachable for any task whose validation `approved` flag is `False`, demonstrated by a deliberately malicious task being blocked and never transmitted.
-- **Non-committed secrets and isolated artifacts.** Generated scripts, JSON logs, and PDF reports will be written only to the gitignored `generated_scripts/`, `logs/`, and `reports/` directories, keeping run output and the `.env` secret out of version control.
-  - *Done when:* a clean `git status` after a full run shows no tracked changes to output directories or `.env`.
+- **Stated reasoning per generated script.** The report will explain why each generated script was relevant to the specific machine, tying the AI's choice back to the collected profile.
+  - *Done when:* each task section of the report contains a rationale that references concrete profile attributes (OS, resources, installed tooling) justifying the generated script.
+- **End-to-end narrative of the run.** The report will describe, in plain language, what system information was collected, what type of script the AI generated, what checks were performed, and what results were found.
+  - *Done when:* every report contains all four of those elements per task, written so the reasoning behind each generated action is explicit, not merely the raw output.
+- **Analyst-readable output.** The report will be understandable to a human security analyst reviewing the run after the fact.
+  - *Done when:* a reviewer who did not write the tool can read a generated report and explain what the tool did and why, without consulting the source code.
 
-### Testing / Validation
+### 4 · Lab Testing and Final Deliverables
 
-- **Automated unit-test suite (`pytest`).** Deterministic unit tests will cover the security-critical and parsing-critical modules: `validator`, `system_profile`, and the `report_writer` extraction helpers.
-  - *Done when:* `pytest` runs green with tests asserting platform detection, package/network parsing, JSON findings extraction, CVE de-duplication, and the retry-loop outcome states.
-- **Validator adversarial corpus.** A fixed corpus of known-malicious scripts — each forbidden action expressed in both shell-string form (`ufw disable`) and subprocess list form (`["ufw", "disable"]`) — will be asserted as rejected, alongside a corpus of legitimate read-only scripts asserted as approved.
-  - *Done when:* 100% of the malicious corpus is blocked and 0% of the read-only corpus is falsely rejected, enforced as automated test assertions.
-- **Live integration validation record.** The Proxmox live run will be captured as a reproducible validation record (the produced PDF and JSON log) demonstrating the full pipeline against real infrastructure.
-  - *Done when:* the submitted evidence includes one PDF report and its paired JSON run log generated from a genuine target on the deployed VM.
-
-### Packaging / Distribution
-
-- **Reproducible build pipeline.** A clean-room build (`build.sh` for Linux, `build.bat` for Windows) will create an isolated virtual environment, install pinned runtime and build dependencies, and invoke PyInstaller against `dai_audit.spec`.
-  - *Done when:* running the build script from a fresh checkout, with no pre-existing virtual environment, produces the platform binary in `dist/` on both operating systems.
-- **End-user run procedure.** A concise operator procedure will document the two prerequisites for running the artifact — placing a `.env` beside it and supplying `--target`/`--user` — and the agent-first SSH authentication path.
-  - *Done when:* a user following only the documented steps, using only the binary and a `.env`, completes an audit and locates the resulting PDF without consulting source code.
+- **Authorized multi-OS lab.** The tool will be tested in a controlled lab of authorized virtual machines including at least one Windows machine and one Linux machine, demonstrating cross-OS adaptability.
+  - *Done when:* the tool completes a full end-to-end run against both an authorized Windows VM and an authorized Linux VM, each producing its own report and run log.
+- **Cross-environment comparison.** The testing will compare how the AI-generated scripts differ between the Windows and Linux environments, and whether they are more relevant than a basic static script.
+  - *Done when:* a written comparison documents the concrete differences between the two environments' generated scripts and assesses their relevance against a fixed static baseline script.
+- **Complete deliverables bundle.** The final submission will include the Python source code, example generated scripts, logs and reports from the test runs, and documentation explaining how the tool works.
+  - *Done when:* all four artifact types are present in the submitted project and the documentation alone is sufficient to run the tool and interpret its output.
+- **Security and ethics discussion.** The submission will include a written discussion of the security limitations and ethical concerns of dynamic, AI-generated code.
+  - *Done when:* a dedicated section addresses the risks and limitations of executing AI-generated scripts and the authorization/ethical boundaries the project operates within.

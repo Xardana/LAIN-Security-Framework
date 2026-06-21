@@ -25,28 +25,52 @@ flowchart TD
     E ==>|"all tasks complete"| N
     N --> O
 
-    %% ============ PHASE 3 — FINAL SHOWCASE (future scope) ============
-    subgraph PHASE3["★ PHASE 3 — FINAL SHOWCASE  (Future Scope / Not Yet Built)"]
+    %% ============ PHASE 3 — FINAL SHOWCASE: ADAPTIVE AUDITING FRAMEWORK ============
+    subgraph PHASE3["★ PHASE 3 — FINAL SHOWCASE · Adaptive Auditing Framework (Not Yet Built)"]
         direction TB
-        TEST["Automated pytest suite +<br/>validator adversarial corpus"]
-        HARD["SSH host-key pinning<br/>(replace AutoAddPolicy)"]
-        PKG["PyInstaller build<br/>dai_audit.spec · clean venv"]
-        EXE[/"Windows .exe artifact"/]
-        ELF[/"Linux ELF artifact"/]
-        PROX["Proxmox VM deployment<br/>same subnet as local LLM"]
-        LIVE["Live end-to-end validation<br/>real target + real model"]
 
-        TEST --> PKG
-        HARD --> PKG
-        PKG --> EXE
-        PKG --> ELF
-        EXE --> PROX
-        ELF --> PROX
-        PROX --> LIVE
+        subgraph ADAPT["1 · Adaptive Script Generation"]
+            direction TB
+            AG1["OS-tier routing<br/>distinct Windows vs Linux script categories"]
+            AG2["Resource-tier routing<br/>lightweight checks on low-memory hosts,<br/>detailed checks on powerful hosts"]
+            AG3["Script category chosen dynamically<br/>from the system profile"]
+            AG1 --> AG3
+            AG2 --> AG3
+        end
+
+        subgraph VALID["2 · Enhanced Validation and Sandbox"]
+            direction TB
+            EV1["Restricted-action scan<br/>(expanded categories)"]
+            EV2["Imported-module review<br/>allowlist"]
+            EV3["File-system access limits"]
+            EV4["Manual confirmation<br/>before execution"]
+            EV5[("Temporary workspace<br/>isolate · log · delete after test")]
+            EV1 --> EV2 --> EV3 --> EV4 --> EV5
+        end
+
+        subgraph REPORT["3 · Explainable Reporting"]
+            direction TB
+            ER1["Reasoning section<br/>why this script fits this machine"]
+            ER2["Narrative: info collected · script type<br/>· checks performed · results found"]
+            ER1 --> ER2
+        end
+
+        subgraph LAB["4 · Lab Testing and Deliverables"]
+            direction TB
+            LT1["Authorized lab VMs<br/>at least 1 Windows + 1 Linux"]
+            LT2["Cross-OS comparison<br/>AI-generated vs static-script relevance"]
+            LT3[/"Deliverables bundle<br/>source · sample scripts · logs/reports<br/>· docs · security and ethics discussion"/]
+            LT1 --> LT2 --> LT3
+        end
     end
 
-    O ==> PKG
-    TEST -.->|"covers all src/ modules"| I
+    %% --- how Phase 3 work extends the current pipeline (dotted = enhances) ---
+    D -.->|"profile drives tier/category"| ADAPT
+    ADAPT -.->|"selected script category"| F
+    VALID -.->|"hardens the gate"| I
+    EV5 -.->|"sandbox for"| L
+    REPORT -.->|"enriches"| O
+    O -.->|"runs feed the comparison"| LAB
 
     %% ============ STYLING ============
     classDef current fill:#e8f0fe,stroke:#1a3d7c,stroke-width:1px,color:#10243e;
@@ -56,7 +80,11 @@ flowchart TD
 
     class A,B,C,D,E,F,G,I,J,L,M,N,O current;
     class H,RES store;
-    class TEST,HARD,PKG,PROX,LIVE future;
-    class EXE,ELF artifact;
+    class AG1,AG2,AG3,EV1,EV2,EV3,EV4,EV5,ER1,ER2,LT1,LT2 future;
+    class LT3 artifact;
 
     style PHASE3 fill:#fff8ec,stroke:#b35900,stroke-width:2px,stroke-dasharray:6 4,color:#5a3000;
+    style ADAPT fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style VALID fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style REPORT fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style LAB fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
