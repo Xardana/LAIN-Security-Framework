@@ -1,70 +1,51 @@
-"""
-ai_client.py
-============
-Single responsibility: talk to the local LLM (Large Language Model) API and
-hand back a structured result. It does NOT build prompts, validate scripts, or
-write reports - those jobs live in other modules.
+# ai_client.py - the only module that actually talks to the local LLM.
+# (prompt_builder builds the text to send; validator checks the reply.)
 
-Where this fits in the program:
-    prompt_builder.py  ->  ai_client.py  ->  validator.py
-    (writes the text)      (this file)       (checks the reply)
+import json            # json.loads() converts a JSON-formatted string into a Python dict
+import os              # [REQUIREMENT: Module os] os.environ reads config from the environment
+import re              # re.search() finds text patterns (used to dig JSON out of the reply)
 
-Coding requirements demonstrated in THIS file:
-    * Functions - every behaviour below is written as a def.
-    * Modules   - uses the standard-library `os` module to read configuration
-                  from environment variables (so secrets are never hard-coded).
-"""
+from dotenv import load_dotenv   # helper that loads a local ".env" file into the environment
+from openai import OpenAI        # the client class that speaks the OpenAI-style API
 
-import json            # standard library: turn the model's text reply into a dict
-import os              # [REQUIREMENT: Module os] read settings from the environment
-import re              # standard library: pull a JSON/code block out of messy text
-
-from dotenv import load_dotenv   # third-party: load values from a local .env file
-from openai import OpenAI        # third-party: OpenAI-compatible client (works with local Ollama)
-
-# Read AI_API_BASE_URL / AI_API_KEY / AI_MODEL from a local .env file (if one
-# exists) into os.environ, so the local LLM's address and key stay out of source.
+# Runs once at import time: copies KEY=VALUE lines from a local .env file into
+# os.environ, so the LLM's address/key live in .env instead of in this source file.
 load_dotenv()
 
-# Fallback model name, used only when AI_MODEL is not set in the environment.
+# A constant (UPPER_CASE by convention): the model name used only if AI_MODEL is unset.
 DEFAULT_MODEL = "huihui_ai/foundation-sec-abliterated"
 
-# Module-level cache: build the API client once, then reuse it on later calls.
-_client = None
+# Module-level variable, starts empty. We build the client the first time it is
+# needed and store it here so later calls reuse the same object instead of rebuilding.
+_client = None        # the leading "_" is a convention meaning "internal to this module"
 
 
 def _get_client():
-    """Build (once) and return the OpenAI-compatible client.
-
-    The connection details are read from environment variables through the `os`
-    module, so the local LLM's IP and key never appear in this file. The created
-    client is stored in the module-level `_client` variable so we only build it
-    a single time.
-    """
-    global _client
-    if _client is None:
-        # [REQUIREMENT: Module os] AI_API_BASE_URL must be provided (e.g. via .env).
-        base_url = os.environ["AI_API_BASE_URL"]
-        # Local Ollama-served models ignore the key, but the OpenAI client still
-        # demands a non-empty string, so we default it to "ollama".
+    # Build (once) and return the API client object.
+    global _client                       # without this, assigning below would create a
+                                          # new LOCAL variable instead of updating the module one
+    if _client is None:                  # True only on the very first call
+        # os.environ["NAME"] reads a REQUIRED variable; it raises KeyError if the
+        # variable is missing - which we want (better to fail loudly than connect to nothing).
+        base_url = os.environ["AI_API_BASE_URL"]      # e.g. http://192.168.1.103:11434/v1
+        # os.environ.get("NAME", default) reads an OPTIONAL variable, returning the
+        # default when it is not set. Local Ollama models ignore the key, but the
+        # OpenAI client still requires some non-empty string.
         api_key = os.environ.get("AI_API_KEY", "ollama")
+        # Create the client object with those two settings and cache it in _client.
         _client = OpenAI(base_url=base_url, api_key=api_key)
-    return _client
+    return _client                       # hand back the cached client
 
 
 def send(system_prompt, user_prompt, model=None):
-    """Send the system + user prompt to the local LLM and return parsed JSON.
-
-    The two inputs are strings (the safety rules and the actual request). The
-    return value is a dict such as {"script": "...", "explanation": "..."} that
-    the validator can inspect. This is the only function other modules call.
-    """
-    client = _get_client()
-    # Pick the caller's model if given, else the environment, else the default.
+    # Public function: send the two prompt strings to the LLM and return parsed JSON.
+    client = _get_client()               # get (or build) the shared client
+    # "a or b" returns a if it is truthy, otherwise b. So: use the model the caller
+    # passed in; if they passed None, fall back to the env var; if that's unset, the default.
     model = model or os.environ.get("AI_MODEL", DEFAULT_MODEL)
 
-    # One chat-completion request: the "system" message carries the safety rules
-    # and the "user" message carries the audit task we want a script for.
+    # Ask the model for one chat completion. "messages" is a list of dicts:
+    # the "system" message carries the rules, the "user" message carries the request.
     response = client.chat.completions.create(
         model=model,
         messages=[
@@ -73,36 +54,38 @@ def send(system_prompt, user_prompt, model=None):
         ],
     )
 
-    # The model's text reply is nested inside the response object.
+    # The reply text is nested deep in the response object: the first choice's
+    # message's content. [0] is the first item of the choices list.
     content = response.choices[0].message.content
-    return _parse_response(content)
+    return _parse_response(content)      # hand the raw text to the parser below
 
 
 def _parse_response(content):
-    """Turn the model's raw text reply into a Python dict.
+    # Turn the model's raw text into a Python dict. Small models don't always
+    # return clean JSON, so we try three strategies in order.
 
-    Small models don't always return clean JSON, so we try three things in order:
-      1) parse the entire reply as JSON;
-      2) find a ```json { ... } ``` fenced block and parse that;
-      3) give up on JSON and treat a ```python ...``` block (or the whole text)
-         as the script, wrapped in the dict shape the rest of the program expects.
-    """
-    # Attempt 1: the whole reply is already valid JSON.
+    # Strategy 1: assume the whole reply is already valid JSON.
     try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass
+        return json.loads(content)       # success -> return the dict immediately
+    except json.JSONDecodeError:         # raised when the text is not valid JSON
+        pass                             # "pass" = do nothing, fall through to strategy 2
 
-    # Attempt 2: a fenced ```json { ... } ``` block somewhere inside the text.
+    # Strategy 2: look for a ```json { ... } ``` block somewhere in the text.
+    # The regex: ``` then optional "json", then capture (...) the {...} object.
+    # re.DOTALL makes "." also match newlines so the object can span lines.
     json_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
-    if json_block:
+    if json_block:                       # truthy only if a match was found
         try:
-            return json.loads(json_block.group(1))
+            return json.loads(json_block.group(1))   # group(1) = the captured {...} text
         except json.JSONDecodeError:
-            pass
+            pass                         # captured text wasn't valid JSON either
 
-    # Attempt 3: fall back to treating a code block (or the raw text) as the script.
+    # Strategy 3: give up on JSON. Treat a ```python ...``` code block as the script.
     code_block = re.search(r"```(?:python)?\s*(.*?)```", content, re.DOTALL)
+    # Ternary "X if cond else Y": if we found a code block use its inner text
+    # (stripped of surrounding whitespace), otherwise use the whole reply stripped.
     script = code_block.group(1).strip() if code_block else content.strip()
 
+    # Wrap whatever we salvaged in the same dict shape the rest of the program expects,
+    # and keep the original text under "raw_response" for the report/debugging.
     return {"script": script, "raw_response": content}

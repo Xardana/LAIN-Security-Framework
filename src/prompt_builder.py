@@ -1,28 +1,10 @@
-"""
-prompt_builder.py
-=================
-Single responsibility: build the text prompts that get sent to the local LLM.
-It does NOT contact the API (that is ai_client.py's job) - it only assembles
-strings.
+# prompt_builder.py - builds the text prompts sent to the LLM. It only assembles
+# strings; ai_client.py is what actually sends them. Prompts are kept small and
+# single-purpose because the target model is small (~8B parameters).
 
-Design notes:
-- The target model is small (~8B params), so prompts are kept short, direct,
-  and single-purpose. One audit task is asked per request rather than one giant
-  "check everything" prompt, which an 8B model handles poorly.
-- Every task chunk is OS-aware. The same task carries a Linux hint and a Windows
-  hint; the builder picks the right one from the profile so the framework stays
-  general across Windows and Linux targets.
-- The safety rules are repeated in the system prompt of every request because
-  small models tend to drift from instructions over a long conversation.
+# --- System-prompt pieces: three constant strings joined together per request ---
 
-Coding requirements demonstrated in THIS file:
-    * Functions - each prompt-building step is its own def.
-    * Casting   - profile values are wrapped in str(...) before slicing/joining,
-                  so a missing or non-string field can never crash prompt building.
-"""
-
-# --- System prompt chunks (role + hard safety rules + output contract) ---
-
+# ROLE tells the model who it is. Repeated every request so it never forgets.
 ROLE = (
     "You are a defensive security auditor working on an explicitly authorized, "
     "read-only audit. You write small READ-ONLY Python scripts that inspect a "
@@ -30,6 +12,8 @@ ROLE = (
     "change the system and you never produce exploit code."
 )
 
+# SAFETY_RULES is the hard "never do this" list. Small models drift over a long
+# conversation, so these rules are re-sent on every single request.
 SAFETY_RULES = (
     "Hard rules, never break them:\n"
     "- READ-ONLY only. Never write, move, delete, or modify any file or setting.\n"
@@ -41,9 +25,8 @@ SAFETY_RULES = (
     "- If a check would require any of the above, skip it and note why instead."
 )
 
-# The exact JSON shape every generated script must print to stdout. Keeping
-# this fixed lets report_writer.py render one standardized PDF template for
-# every task without guessing at free-form text.
+# FINDINGS_SCHEMA is the exact JSON shape the generated script must PRINT when it
+# runs. Fixing this shape lets report_writer render one consistent PDF template.
 FINDINGS_SCHEMA = (
     "{\n"
     '  "task": "<this task name>",\n'
@@ -60,6 +43,8 @@ FINDINGS_SCHEMA = (
     "when a specific CVE applies, otherwise use an empty list."
 )
 
+# OUTPUT_CONTRACT describes the REPLY shape (a {"script","explanation"} wrapper).
+# The "+ FINDINGS_SCHEMA" concatenates the schema string onto the end.
 OUTPUT_CONTRACT = (
     "Reply with ONLY a JSON object, no prose, in this exact shape:\n"
     '{"script": "<python3 source>", "explanation": "<one sentence>"}\n'
@@ -69,7 +54,7 @@ OUTPUT_CONTRACT = (
     "shape:\n" + FINDINGS_SCHEMA
 )
 
-# --- Per-OS guidance chunks ---
+# --- Per-OS guidance: which one we attach depends on the detected platform ---
 
 LINUX_HINTS = (
     "Target is Linux. Prefer reading /etc, /proc and standard files, or running "
@@ -83,9 +68,9 @@ WINDOWS_HINTS = (
     "run via subprocess with a timeout. Do not assume Administrator."
 )
 
-# --- Audit task chunks: small, specific, OS-aware checks ---
-# Each can be asked on its own so the request stays small for an 8B model.
-
+# --- The audit tasks: a dict of small, specific checks, asked one at a time ---
+# Each task has an "ask" (what to do) plus a "linux"/"windows" hint (how to do it
+# on that OS). One task per request keeps each prompt small for the 8B model.
 AUDIT_TASKS = {
     "patch_status": {
         "ask": "Check the OS patch / update status and report pending security updates.",
@@ -121,91 +106,75 @@ AUDIT_TASKS = {
 
 
 def _platform(profile):
-    """Return 'windows' or 'linux' for OS-specific prompt selection.
-
-    system_profile.parse() already normalizes the detected OS into a 'platform'
-    field, so we trust that authoritative value; we only fall back to sniffing
-    the raw os string if an older profile lacks that field.
-    """
-    # [REQUIREMENT: Casting] str(...) guards against a missing/None field so
-    # .lower() always works, even before we know the value's real type.
+    # Return "windows" or "linux" so we attach the right OS hint.
+    # [REQUIREMENT: Casting] str(...) guards a missing field so .lower() always works.
     platform = str(profile.get("platform", "")).lower()
-    if platform in ("linux", "windows"):
+    if platform in ("linux", "windows"):     # system_profile already normalised it -> trust it
         return platform
+    # Fallback for an older profile without a "platform" field: sniff the os string.
     return "windows" if "win" in str(profile.get("os", "")).lower() else "linux"
 
 
 def _profile_summary(profile):
-    """Compact, model-friendly summary of the target. Kept short on purpose:
-    interface names and a package count/sample are included, but the full
-    package list is left out so the prompt stays small for an 8B model."""
-    fields = ("os", "os_release", "arch", "python_version", "privilege", "tools")
-    lines = []
+    # Build a short bullet list describing the target, to drop into the prompt.
+    fields = ("os", "os_release", "arch", "python_version", "privilege", "tools")  # tuple of keys to show
+    lines = []                               # we collect one "- key: value" string per field
     for field in fields:
         value = profile.get(field)
-        if value:
-            # [REQUIREMENT: Casting] str(value) lets us safely .strip() and slice
-            # the value to 200 chars regardless of its original type.
+        if value:                            # skip fields that are empty/missing
+            # [REQUIREMENT: Casting] str(value) lets us .strip() and slice [:200]
+            # (keep the first 200 chars) regardless of the value's real type.
             lines.append(f"- {field}: {str(value).strip()[:200]}")
     network = profile.get("network")
     if network:
+        # ", ".join(list) glues the interface names into one comma-separated string.
         lines.append(f"- network interfaces: {', '.join(network)[:200]}")
     packages = profile.get("packages")
     if packages:
-        # Show only a count plus the first 15 names so the prompt stays small.
-        sample = ", ".join(packages[:15])
+        sample = ", ".join(packages[:15])    # [:15] = only the first 15 names, to stay small
+        # len(packages) is the total count; we show count + sample, not the full list.
         lines.append(f"- python packages ({len(packages)} installed): {sample[:200]}")
+    # "\n".join(lines) joins the bullets with newlines; if lines is empty use a placeholder.
     return "\n".join(lines) if lines else "- (no profile details available)"
 
 
 def build_system_prompt():
-    """Assemble the system prompt (role + safety rules + output contract).
-
-    These three reusable text chunks are joined into the "system" message that
-    is sent on every single request, so the model is always reminded of who it
-    is, what it must never do, and exactly what JSON shape to return.
-    """
+    # Glue the three system-prompt constants together with blank lines between them.
     return "\n\n".join([ROLE, SAFETY_RULES, OUTPUT_CONTRACT])
 
 
 def task_keys():
-    """Return the list of audit task names the orchestrator should run.
-
-    main.py loops over these keys, asking the model for one script per task.
-    """
+    # Return the task names as a list so main.py can loop over them.
+    # list(dict.keys()) makes a real list from the dict's keys.
     return list(AUDIT_TASKS.keys())
 
 
 def build_task_prompt(profile, task_key, feedback=None):
-    """Build the (system_prompt, user_prompt) pair for ONE audit task.
+    # Build the (system_prompt, user_prompt) pair for ONE task. feedback is None
+    # the first time, or the validator's complaints on a retry.
+    if task_key not in AUDIT_TASKS:                 # guard against an unknown task name
+        raise KeyError(f"Unknown audit task: {task_key}")   # raise = stop with an error
 
-    This is the main function other modules call. Sending one task per request
-    keeps each prompt small enough for the 8B model to handle reliably.
-
-    `feedback`, when given, is the list of validator issues from a rejected
-    previous attempt; it is appended so the model knows what to fix on a retry.
-    """
-    # Fail loudly on an unknown task name rather than silently building junk.
-    if task_key not in AUDIT_TASKS:
-        raise KeyError(f"Unknown audit task: {task_key}")
-
-    # Choose the Linux or Windows guidance based on the detected platform.
-    platform = _platform(profile)
-    task = AUDIT_TASKS[task_key]
+    platform = _platform(profile)                   # "linux" or "windows"
+    task = AUDIT_TASKS[task_key]                     # the dict for this specific task
+    # Pick the matching OS hint with a ternary expression.
     os_hint = LINUX_HINTS if platform == "linux" else WINDOWS_HINTS
 
-    # Assemble the user message piece by piece, then join with blank lines.
+    # Build the user message as a list of sections; we join them at the end.
     parts = [
-        "Target machine profile:\n" + _profile_summary(profile),
-        os_hint,
-        "Audit task: " + task["ask"],
-        "Guidance: " + task[platform],
+        "Target machine profile:\n" + _profile_summary(profile),  # who the target is
+        os_hint,                                                  # how to approach this OS
+        "Audit task: " + task["ask"],                            # what to check
+        "Guidance: " + task[platform],                           # OS-specific how-to for this task
         "Write the read-only Python audit script for this one task now.",
     ]
-    if feedback:
+    if feedback:                                    # only present on a retry
+        # Append a section listing each rejection reason so the model can fix them.
+        # The inner "\n".join(...) turns the issues list into "- issue" lines.
         parts.append(
             "Your previous attempt was REJECTED by the safety validator for:\n"
             + "\n".join(f"- {issue}" for issue in feedback)
             + "\nRewrite the script so it does none of these; keep it read-only."
         )
+    # Return the system prompt plus the user prompt (sections joined by blank lines).
     return build_system_prompt(), "\n\n".join(parts)
