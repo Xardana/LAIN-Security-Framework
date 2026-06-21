@@ -1,10 +1,16 @@
-# prompt_builder.py - builds the text prompts sent to the LLM. It only assembles
-# strings; ai_client.py is what actually sends them. Prompts are kept small and
-# single-purpose because the target model is small (~8B parameters).
+# prompt_builder.py - assembles the text prompts sent to the LLM. Architectural role:
+# this is "prompt engineering as code." It contains ZERO networking (ai_client does that)
+# and ZERO logic that runs scripts - it only builds strings. Separating prompt text from
+# the transport makes prompts easy to tune and test in isolation. Prompts are kept small
+# and single-purpose because the target model is small (~8B parameters).
 
-# --- System-prompt pieces: three constant strings joined together per request ---
+# --- The system prompt is built from three constant strings joined per request. ---
+# WHY constants: defining them once at module level means the exact same wording is reused
+# on every call, which keeps the model's behaviour consistent and the code DRY.
+# Syntax note: wrapping string literals in ( ... ) and placing them adjacent makes Python
+# AUTOMATICALLY concatenate them at compile time into one string - a clean way to write
+# long text without "+" on every line.
 
-# ROLE tells the model who it is. Repeated every request so it never forgets.
 ROLE = (
     "You are a defensive security auditor working on an explicitly authorized, "
     "read-only audit. You write small READ-ONLY Python scripts that inspect a "
@@ -12,8 +18,8 @@ ROLE = (
     "change the system and you never produce exploit code."
 )
 
-# SAFETY_RULES is the hard "never do this" list. Small models drift over a long
-# conversation, so these rules are re-sent on every single request.
+# The "\n" sequences are newline ESCAPE characters - they become real line breaks in the
+# final string, formatting the rules as a bullet list the model reads clearly.
 SAFETY_RULES = (
     "Hard rules, never break them:\n"
     "- READ-ONLY only. Never write, move, delete, or modify any file or setting.\n"
@@ -25,8 +31,9 @@ SAFETY_RULES = (
     "- If a check would require any of the above, skip it and note why instead."
 )
 
-# FINDINGS_SCHEMA is the exact JSON shape the generated script must PRINT when it
-# runs. Fixing this shape lets report_writer render one consistent PDF template.
+# WHY a fixed output schema: by forcing the generated SCRIPT to print this exact JSON shape,
+# report_writer can parse every task identically instead of guessing at free-form text.
+# This is a "contract" between the AI output and our parser.
 FINDINGS_SCHEMA = (
     "{\n"
     '  "task": "<this task name>",\n'
@@ -43,8 +50,8 @@ FINDINGS_SCHEMA = (
     "when a specific CVE applies, otherwise use an empty list."
 )
 
-# OUTPUT_CONTRACT describes the REPLY shape (a {"script","explanation"} wrapper).
-# The "+ FINDINGS_SCHEMA" concatenates the schema string onto the end.
+# Note the "+ FINDINGS_SCHEMA" at the end: this is runtime string CONCATENATION with "+",
+# gluing the schema constant onto the end of this contract description.
 OUTPUT_CONTRACT = (
     "Reply with ONLY a JSON object, no prose, in this exact shape:\n"
     '{"script": "<python3 source>", "explanation": "<one sentence>"}\n'
@@ -54,8 +61,7 @@ OUTPUT_CONTRACT = (
     "shape:\n" + FINDINGS_SCHEMA
 )
 
-# --- Per-OS guidance: which one we attach depends on the detected platform ---
-
+# --- Per-OS guidance. We attach exactly one of these depending on the detected platform. ---
 LINUX_HINTS = (
     "Target is Linux. Prefer reading /etc, /proc and standard files, or running "
     "read-only commands (uname, id, ss, systemctl is-enabled, sysctl) via "
@@ -68,9 +74,9 @@ WINDOWS_HINTS = (
     "run via subprocess with a timeout. Do not assume Administrator."
 )
 
-# --- The audit tasks: a dict of small, specific checks, asked one at a time ---
-# Each task has an "ask" (what to do) plus a "linux"/"windows" hint (how to do it
-# on that OS). One task per request keeps each prompt small for the 8B model.
+# --- The audit catalogue: a DICT OF DICTS. Outer key = task name; inner dict holds the
+# task's "ask" plus a Linux and a Windows hint. WHY this structure: it's a lookup table that
+# keeps each task's data together and lets us add/remove tasks without touching the code logic.
 AUDIT_TASKS = {
     "patch_status": {
         "ask": "Check the OS patch / update status and report pending security updates.",
@@ -106,75 +112,84 @@ AUDIT_TASKS = {
 
 
 def _platform(profile):
-    # Return "windows" or "linux" so we attach the right OS hint.
-    # [REQUIREMENT: Casting] str(...) guards a missing field so .lower() always works.
+    # WHY (logic): pick the right OS hint. We trust system_profile's normalised "platform"
+    # field first and only "sniff" the os string as a fallback for older data.
+    # HOW (syntax): str(...) is a defensive CAST [REQUIREMENT: Casting] so .lower() works even
+    # if "platform" is missing (None). dict.get("platform", "") returns "" when absent.
     platform = str(profile.get("platform", "")).lower()
-    if platform in ("linux", "windows"):     # system_profile already normalised it -> trust it
+    if platform in ("linux", "windows"):     # membership test against a tuple of valid values
         return platform
-    # Fallback for an older profile without a "platform" field: sniff the os string.
     return "windows" if "win" in str(profile.get("os", "")).lower() else "linux"
 
 
 def _profile_summary(profile):
-    # Build a short bullet list describing the target, to drop into the prompt.
+    # WHY (logic): compress the profile into a short bullet list for the prompt. We keep it
+    # SMALL on purpose - a small model handles a tight prompt far better than a huge data dump.
     fields = ("os", "os_release", "arch", "python_version", "privilege", "tools")  # tuple of keys to show
-    lines = []                               # we collect one "- key: value" string per field
+    lines = []                               # we collect one formatted line per present field
     for field in fields:
         value = profile.get(field)
-        if value:                            # skip fields that are empty/missing
-            # [REQUIREMENT: Casting] str(value) lets us .strip() and slice [:200]
-            # (keep the first 200 chars) regardless of the value's real type.
+        if value:                            # skip empty/missing fields
+            # str(value) CAST [REQUIREMENT: Casting] lets us call .strip() and SLICE it.
+            # [:200] is slice syntax: "from start up to index 200" - caps each line's length.
             lines.append(f"- {field}: {str(value).strip()[:200]}")
     network = profile.get("network")
     if network:
-        # ", ".join(list) glues the interface names into one comma-separated string.
+        # ", ".join(list) is the standard idiom to turn a list of strings into one comma-
+        # separated string. UNDER THE HOOD join walks the list inserting the separator between items.
         lines.append(f"- network interfaces: {', '.join(network)[:200]}")
     packages = profile.get("packages")
     if packages:
-        sample = ", ".join(packages[:15])    # [:15] = only the first 15 names, to stay small
-        # len(packages) is the total count; we show count + sample, not the full list.
+        sample = ", ".join(packages[:15])    # packages[:15] slices the FIRST 15 items only
+        # len(packages) returns the item count; we show the count plus a short sample, not all of them.
         lines.append(f"- python packages ({len(packages)} installed): {sample[:200]}")
-    # "\n".join(lines) joins the bullets with newlines; if lines is empty use a placeholder.
+    # "\n".join(lines) glues the bullets with newlines. Ternary: if lines is empty (falsy),
+    # use a placeholder string instead.
     return "\n".join(lines) if lines else "- (no profile details available)"
 
 
 def build_system_prompt():
-    # Glue the three system-prompt constants together with blank lines between them.
+    # WHY (logic): the system prompt is identical for every task, so we build it from the
+    # three constants here. "\n\n".join([...]) joins the list with a BLANK line between each
+    # part, visually separating role / rules / output-contract for the model.
     return "\n\n".join([ROLE, SAFETY_RULES, OUTPUT_CONTRACT])
 
 
 def task_keys():
-    # Return the task names as a list so main.py can loop over them.
-    # list(dict.keys()) makes a real list from the dict's keys.
+    # WHY (logic): expose the task names so main.py can loop over them without importing the
+    # whole AUDIT_TASKS dict. list(dict.keys()) materialises the keys VIEW into a real list.
     return list(AUDIT_TASKS.keys())
 
 
 def build_task_prompt(profile, task_key, feedback=None):
-    # Build the (system_prompt, user_prompt) pair for ONE task. feedback is None
-    # the first time, or the validator's complaints on a retry.
-    if task_key not in AUDIT_TASKS:                 # guard against an unknown task name
-        raise KeyError(f"Unknown audit task: {task_key}")   # raise = stop with an error
+    # WHY (logic): build the (system, user) prompt pair for ONE task. `feedback=None` is a
+    # DEFAULT ARGUMENT - callers can omit it (first attempt) or pass the validator's complaints
+    # (a retry). Returning a TUPLE lets the caller unpack both prompts in one line.
+    if task_key not in AUDIT_TASKS:                 # guard: reject unknown task names early
+        # `raise` throws an exception, stopping execution and signalling a programming error.
+        raise KeyError(f"Unknown audit task: {task_key}")
 
     platform = _platform(profile)                   # "linux" or "windows"
-    task = AUDIT_TASKS[task_key]                     # the dict for this specific task
-    # Pick the matching OS hint with a ternary expression.
-    os_hint = LINUX_HINTS if platform == "linux" else WINDOWS_HINTS
+    task = AUDIT_TASKS[task_key]                     # [] lookup; safe here because we checked membership above
+    os_hint = LINUX_HINTS if platform == "linux" else WINDOWS_HINTS   # ternary picks the matching hint
 
-    # Build the user message as a list of sections; we join them at the end.
+    # Build the user message as a LIST of sections; joining at the end is cheaper and cleaner
+    # than concatenating strings repeatedly. task["ask"]/task[platform] index into the inner dict.
     parts = [
-        "Target machine profile:\n" + _profile_summary(profile),  # who the target is
-        os_hint,                                                  # how to approach this OS
-        "Audit task: " + task["ask"],                            # what to check
-        "Guidance: " + task[platform],                           # OS-specific how-to for this task
+        "Target machine profile:\n" + _profile_summary(profile),
+        os_hint,
+        "Audit task: " + task["ask"],
+        "Guidance: " + task[platform],
         "Write the read-only Python audit script for this one task now.",
     ]
-    if feedback:                                    # only present on a retry
-        # Append a section listing each rejection reason so the model can fix them.
-        # The inner "\n".join(...) turns the issues list into "- issue" lines.
+    if feedback:                                    # truthy only on a retry (a non-empty list)
+        # GENERATOR EXPRESSION inside join: "f'- {issue}' for issue in feedback" yields one
+        # "- <issue>" line per item, and "\n".join(...) stitches them with newlines. WHY: telling
+        # the model exactly what it did wrong dramatically improves the next attempt.
         parts.append(
             "Your previous attempt was REJECTED by the safety validator for:\n"
             + "\n".join(f"- {issue}" for issue in feedback)
             + "\nRewrite the script so it does none of these; keep it read-only."
         )
-    # Return the system prompt plus the user prompt (sections joined by blank lines).
+    # Return BOTH prompts: the system prompt and the user prompt (parts joined by blank lines).
     return build_system_prompt(), "\n\n".join(parts)
