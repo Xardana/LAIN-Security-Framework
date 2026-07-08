@@ -1,20 +1,22 @@
-# target_connector.py - owns ALL SSH communication with the remote targets.
-# Architectural role: the framework runs on a safe "controller" machine and never
-# installs anything on the target; it only reaches in over SSH to (1) read info and
-# (2) run one approved script. Keeping every SSH detail in this one file means the
-# rest of the program thinks in terms of "collect_system_info" / "execute_script",
-# not sockets and channels.
+"""
+target_connector.py handles all the SSH communication with the remote target
+machines. This program runs on a safe "controller" computer and never installs
+anything on the target - it only connects in over SSH to (1) read information
+and (2) run one approved script. Keeping every SSH detail in this one file
+means the rest of the program can just say "collect_system_info" or
+"execute_script" without needing to know anything about SSH itself.
+"""
 
-import uuid            # stdlib. uuid.uuid4() generates a random 128-bit Universally Unique ID.
-                       # We use it so each uploaded temp script gets a name that cannot collide.
+import uuid            # generates a random, one-of-a-kind id.
+                       # We use it so each temporary script we upload gets a name that can never collide.
 
-import paramiko        # [REQUIREMENT: Module] third-party pure-Python SSHv2 client. It implements
-                       # the SSH protocol (auth, encrypted channels, SFTP) so we don't shell out to `ssh`.
+import paramiko        # [REQUIREMENT: Module] a library that speaks the SSH protocol for us,
+                       # so we don't need to shell out to a separate `ssh` program.
 
-# A dict literal mapping a LABEL (the key) -> a shell COMMAND (the value) for Linux.
-# WHY a dict: it pairs each result with a name and lets us loop over everything uniformly.
-# Every command is read-only. Shell notes: "2>/dev/null" discards error output;
-# "cmd_a || cmd_b" runs cmd_b only if cmd_a fails (exit code != 0).
+"""This maps a short label to the shell command that produces it, for Linux.
+Every command here is read-only. A couple of shell notes: "2>/dev/null" just
+hides error messages, and "cmd_a || cmd_b" means "try cmd_a, and only run
+cmd_b if cmd_a fails"."""
 UNIX_COMMANDS = {
     "os": "uname -a",                                              # kernel/OS summary line
     "os_release": "cat /etc/os-release 2>/dev/null",              # distro name + version
@@ -28,16 +30,16 @@ UNIX_COMMANDS = {
     "packages": "python3 -m pip list 2>/dev/null || pip3 list 2>/dev/null || pip list 2>/dev/null",
 }
 
-# The same logical checks rewritten for Windows (cmd.exe). "2>nul" is the Windows
-# equivalent of discarding error output. WHY a separate dict: the two operating
-# systems expose the same facts through completely different commands.
+"""The same checks, rewritten for Windows. "2>nul" is the Windows equivalent
+of hiding error messages. We need a separate list because Windows and Linux
+show the same information through completely different commands."""
 WINDOWS_COMMANDS = {
-    "os": "systeminfo | findstr /B /C:\"OS Name\" /C:\"OS Version\"",  # "|" pipes output into findstr (a filter)
+    "os": "systeminfo | findstr /B /C:\"OS Name\" /C:\"OS Version\"",  # pipe the output through a filter
     "os_release": "ver",                                              # prints the Windows version
     "python_version": "python --version 2>&1 || python3 --version 2>&1",
-    "cpu": "wmic cpu get Name,NumberOfCores /value",                 # WMI query for CPU facts
+    "cpu": "wmic cpu get Name,NumberOfCores /value",                 # CPU facts
     "memory": "wmic OS get FreePhysicalMemory,TotalVisibleMemorySize /value",
-    "arch": "echo %PROCESSOR_ARCHITECTURE%",                         # echoes an environment variable
+    "arch": "echo %PROCESSOR_ARCHITECTURE%",                         # prints an environment variable
     "whoami": "whoami",
     "network": "ipconfig /all",                                      # full network configuration
     "tools": "for %t in (python python3 powershell) do where %t 2>nul",
@@ -46,106 +48,93 @@ WINDOWS_COMMANDS = {
 
 
 def _connect(host, username, key_path=None, password=None):
-    # WHY (logic): one private helper builds every connection so auth policy lives in a
-    # single place. key_path/password default to None, meaning "not supplied" - in which
-    # case authentication falls back to the ssh-agent (no secret is handled by our code).
-    client = paramiko.SSHClient()                          # create the SSH client object
-    # load_system_host_keys() reads the OS known_hosts file so we recognise servers
-    # we've connected to before (this is the SSH defence against man-in-the-middle).
+    """Open one SSH connection to the target. Keeping this in a single helper
+    means all our login rules live in one place. If no key or password is
+    given, it just falls back to whatever the ssh-agent already knows -
+    our own code never has to handle a secret directly."""
+    client = paramiko.SSHClient()                          # create the SSH client
+    # Read the local computer's list of known, trusted servers.
     client.load_system_host_keys()
-    # If the host key is unknown, this policy auto-accepts it. (Phase 3 plans to tighten
-    # this to reject unknown keys.) set_missing_host_key_policy installs that decision rule.
+    # If we've never seen this server before, just trust it automatically. (A future
+    # version of this project plans to make this stricter and reject unknown servers.)
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    # .connect() performs the TCP connect + SSH handshake + authentication. Passing
-    # arguments BY KEYWORD (name=value) makes the call self-documenting and order-independent.
+    # Actually connect and log in.
     client.connect(
         hostname=host,
         username=username,
         key_filename=key_path,                             # use this private key file if given
         password=password,                                 # or this password if given
-        allow_agent=True,                                  # else ask the running ssh-agent (agent-first)
-        look_for_keys=key_path is None,                    # only auto-scan ~/.ssh when no key was passed
+        allow_agent=True,                                  # otherwise ask the running ssh-agent first
+        look_for_keys=key_path is None,                    # only search ~/.ssh if no key was passed in
     )
-    return client                                          # the CALLER must close it (see try/finally below)
+    return client                                          # the caller is responsible for closing this
 
 
 def _detect_platform(client):
-    # WHY (logic): every other step depends on knowing the OS, so we probe it once.
-    # client.exec_command(cmd) runs a command on the target and returns a 3-TUPLE of
-    # file-like channel objects: (stdin, stdout, stderr). We "unpack" that tuple; the
-    # underscores `_` are throwaway names for the streams we don't need here.
-    _, stdout, _ = client.exec_command("uname -s 2>/dev/null")  # `uname` exists only on Unix
-    # CHAIN of calls, evaluated left to right:
-    #   stdout.read()           -> reads all output as raw BYTES (e.g. b"Linux\n")
-    #   .decode(errors="replace") -> [REQUIREMENT: Casting] converts bytes to a str using UTF-8;
-    #                                "replace" swaps any undecodable byte for the U+FFFD char
-    #                                instead of raising, so this never crashes.
-    #   .strip()                -> removes surrounding whitespace/newlines
-    # A non-empty string is "truthy" -> Unix; an empty string is "falsy" -> Windows.
+    """Every other step depends on knowing the target's OS, so we check it
+    once, right at the start."""
+    # `uname` only exists on Unix-like systems, so if this prints anything, we know it's Unix.
+    _, stdout, _ = client.exec_command("uname -s 2>/dev/null")
+    # [REQUIREMENT: Casting] read the raw output, turn it into text, and trim extra whitespace.
+    # A non-empty result means Unix; nothing at all means Windows.
     return "unix" if stdout.read().decode(errors="replace").strip() else "windows"
 
 
 def _run_command_set(client, commands):
-    # WHY (logic): generic runner - hand it any {label: command} dict and it returns
-    # {label: output}. Reusing it for both OS dicts avoids duplicated loops.
-    raw_data = {}                                          # start an empty result dict
-    # .items() yields (key, value) pairs from the dict; the `for label, command in`
-    # unpacks each pair into two named variables on every iteration.
+    """Run a whole {label: command} dict and give back a matching {label:
+    output} dict. Reusing this one function for both operating systems avoids
+    writing the same loop twice."""
+    raw_data = {}                                          # the results we're building up
     for label, command in commands.items():
-        _, stdout, _ = client.exec_command(command)        # run it; keep only stdout
-        # [REQUIREMENT: Casting] bytes -> str -> trimmed, then stored under its label.
-        raw_data[label] = stdout.read().decode(errors="replace").strip()
+        _, stdout, _ = client.exec_command(command)        # run it; we only care about stdout
+        raw_data[label] = stdout.read().decode(errors="replace").strip()  # [REQUIREMENT: Casting]
     return raw_data
 
 
 def collect_system_info(host, username, key_path=None, password=None):
-    # WHY (logic): the public "READ" step. It guarantees the connection is always closed,
-    # even if something fails midway, by using try/finally.
+    """The public "read" step. This always closes the connection when it's
+    done, even if something goes wrong partway through."""
     client = _connect(host, username, key_path, password)
     try:
         platform = _detect_platform(client)                # "unix" or "windows"
-        # Ternary chooses the command set matching the detected OS.
-        commands = UNIX_COMMANDS if platform == "unix" else WINDOWS_COMMANDS
+        commands = UNIX_COMMANDS if platform == "unix" else WINDOWS_COMMANDS  # pick the matching command list
         raw_data = _run_command_set(client, commands)
-        raw_data["platform"] = platform                    # tag the result so later steps know the OS
+        raw_data["platform"] = platform                    # note the OS so later steps don't have to re-check
         return raw_data
     finally:
-        # `finally` ALWAYS runs - whether the try block returned normally or raised an
-        # exception. WHY: an unclosed SSH session leaks a socket/file handle on both ends.
+        # This always runs, whether things succeeded or failed, so we never leave
+        # a connection open by accident.
         client.close()
 
 
 def execute_script(host, username, script, key_path=None, password=None):
-    # WHY (logic): the public "ACT" step. It uploads ONE validated script, runs it,
-    # captures its output, and deletes it - leaving no trace on the target.
+    """The public "act" step. This uploads one already-approved script, runs
+    it, captures whatever it prints, and then deletes it - leaving nothing
+    behind on the target."""
     client = _connect(host, username, key_path, password)
     try:
         platform = _detect_platform(client)
         if platform == "unix":
-            # f-string (formatted string literal): the f prefix lets {expression} be
-            # evaluated and inserted. uuid.uuid4().hex is a 32-char random hex string,
-            # so two concurrent runs can never pick the same temp filename.
+            # A random filename means two runs happening at the same time can never collide.
             remote_path = f"/tmp/.audit_{uuid.uuid4().hex}.py"
         else:
-            # On Windows, SFTP does NOT expand %TEMP%, so we ask the shell to print it first,
-            # then build the path ourselves. "\\" in a normal string is a single backslash.
+            # On Windows, we need to ask the shell for the temp folder path first, then build our own path.
             _, stdout, _ = client.exec_command("echo %TEMP%")
             temp_dir = stdout.read().decode(errors="replace").strip()
             remote_path = f"{temp_dir}\\audit_{uuid.uuid4().hex}.py"
 
-        # open_sftp() opens a file-transfer channel over the existing SSH connection.
+        # Open a file-transfer channel over the same SSH connection.
         sftp = client.open_sftp()
         try:
-            # `with` is a CONTEXT MANAGER: it calls the file's __enter__ on entry and
-            # GUARANTEES __exit__ (which closes the remote file) on exit, even on error.
-            # WHY: it's the idiomatic, leak-proof way to handle files in Python.
-            with sftp.open(remote_path, "w") as remote_file:  # "w" = open for writing (truncate)
-                remote_file.write(script)                     # write the script's source text
+            # Write the script's text to the target machine, and make sure the file gets
+            # closed properly afterward no matter what happens.
+            with sftp.open(remote_path, "w") as remote_file:  # "w" = open for writing
+                remote_file.write(script)
         finally:
-            sftp.close()                                      # close the SFTP channel
+            sftp.close()                                      # close the file-transfer channel
 
         try:
-            # Build OS-appropriate "run" and "cleanup" commands as strings.
+            # Build the right "run it" and "clean up" commands for this OS.
             if platform == "unix":
                 run_cmd = f"python3 {remote_path} || python {remote_path}"
                 cleanup_cmd = f"rm -f {remote_path}"
@@ -153,16 +142,17 @@ def execute_script(host, username, script, key_path=None, password=None):
                 run_cmd = f"python {remote_path}"
                 cleanup_cmd = f"del /f /q {remote_path}"
 
-            # Here we keep BOTH stdout and stderr to capture findings and any errors.
+            # Keep both the normal output and any error messages.
             _, stdout, stderr = client.exec_command(run_cmd)
-            # [REQUIREMENT: Casting] decode each byte stream to text.
+            # [REQUIREMENT: Casting] convert each stream of raw bytes into readable text.
             output = stdout.read().decode(errors="replace")   # the script's printed JSON
             errors = stderr.read().decode(errors="replace")   # any error/traceback text
         finally:
-            # Always delete the temp script, even if running it raised - no residue left behind.
+            # Always delete the temporary script, even if running it went wrong, so
+            # nothing is left behind on the target.
             client.exec_command(cleanup_cmd)
 
-        # Return both streams in a dict; report_writer will parse "output" as JSON.
+        # Give back both streams; report_writer will read "output" as JSON.
         return {"output": output, "errors": errors}
     finally:
         client.close()

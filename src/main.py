@@ -1,13 +1,14 @@
-# main.py - the CONTROLLER / entry point. Architectural role: this is the "orchestrator."
-# It contains almost no business logic itself; instead it wires the six single-purpose modules
-# together in the right order. Keeping orchestration separate from the workers makes each worker
-# independently testable and makes the high-level flow readable in one place.
+"""
+main.py is the starting point of the program. It doesn't do much work itself -
+instead it calls the six other files in the right order, kind of like a
+recipe that tells each helper when to do its job.
+"""
 
-import argparse   # stdlib: declarative command-line parsing (turns sys.argv into typed options).
+import argparse   # a library that reads the options typed on the command line.
 import os          # [REQUIREMENT: Module os] os.environ reads the optional SSH password.
 import sys         # [REQUIREMENT: Module sys] sys.exit (process exit codes) + sys.stderr (error stream).
 
-# Import the six workers. Each name is the module's single responsibility.
+# Bring in the six helper files. Each one has one job.
 import target_connector   # SSH: read info from / run scripts on the target
 import system_profile     # parse raw output into a clean dict
 import prompt_builder     # build the LLM prompts
@@ -16,13 +17,11 @@ import validator          # safety-check generated scripts
 import report_writer      # save logs/scripts + write the PDF
 
 
-# [REQUIREMENT: Functions] The program is decomposed into functions. WHY: separating "read the
-# arguments" from "run the audit" keeps each function short and single-purpose.
+"""[REQUIREMENT: Functions] The program is split into functions so that "reading the
+command-line options" and "running the audit" each stay short and easy to follow."""
 def parse_args():
-    # WHY (logic): argparse gives us --help, validation, and typed access for free.
-    # HOW (syntax): ArgumentParser() builds a parser object; each .add_argument() declares one
-    # flag. required=True makes argparse error out if it's missing; default=... supplies a value
-    # when the flag is omitted. The "description"/"help" strings appear in --help output.
+    """This sets up the command-line options the program accepts, like --target
+    and --user, and describes what each one is for."""
     parser = argparse.ArgumentParser(
         description="Defensive AI Audit Framework - runs on controller, audits remote targets over SSH"
     )
@@ -30,22 +29,19 @@ def parse_args():
     parser.add_argument("--user", required=True, help="SSH username on target machine")
     parser.add_argument("--key", default=None, help="Path to SSH private key file (optional)")
     parser.add_argument("--output", default="reports/audit_report.pdf", help="Path for the final PDF report")
-    # parse_args() reads sys.argv UNDER THE HOOD, validates it, and returns a Namespace object
-    # whose attributes are the parsed values (e.g. the parsed --target is available as args.target).
+    # This reads whatever the user typed and hands back a neat object with each option on it.
     return parser.parse_args()
 
 
 def main():
     args = parse_args()                              # the orchestration begins
 
-    # os.environ.get("SSH_PASSWORD") returns the env var's value, or None if it isn't set.
-    # WHY: password is optional - if absent, paramiko falls back to the ssh-agent or a key file.
+    # Look up an optional password from the environment; if it's not set, this is just empty.
     ssh_password = os.environ.get("SSH_PASSWORD")
 
-    print(f"[*] Starting audit of target: {args.target}")   # f-string interpolates args.target
+    print(f"[*] Starting audit of target: {args.target}")
 
     # --- Step 1: SSH in and collect raw, read-only system information ---
-    # Arguments passed BY KEYWORD for readability. This returns a dict of {label: raw output}.
     raw_data = target_connector.collect_system_info(
         host=args.target,
         username=args.user,
@@ -53,21 +49,21 @@ def main():
         password=ssh_password,
     )
 
-    # `not raw_data` is True for None or an EMPTY dict (both falsy). Nothing collected = nothing to do.
+    # If nothing came back, there's nothing to do, so stop here.
     if not raw_data:
-        # WHY (logic): a CLI tool should signal failure through its EXIT CODE so scripts/CI can detect it.
-        # HOW (syntax): print(..., file=sys.stderr) writes to the standard ERROR stream (stderr), kept
-        # separate from normal output (stdout). sys.exit(1) ends the process with status 1 (non-zero = failure).
+        """If something goes wrong, we want the program to clearly say so and
+        exit with an error status, so anything watching this program (like a
+        script or another tool) knows the run failed."""
         print("[ERROR] No system information collected from target.", file=sys.stderr)
         sys.exit(1)
 
     # --- Step 2: Parse the raw output into a structured profile dict ---
-    profile = system_profile.parse(raw_data)         # also decides linux/windows (drives OS-correct prompts)
+    profile = system_profile.parse(raw_data)         # also figures out linux vs windows
     print(f"[*] System profile collected: {profile.get('os', 'unknown')} "
           f"/ {profile.get('arch', 'unknown')} ({profile.get('platform', 'unknown')})")
 
-    # An accumulator dict we grow as we go, then hand to report_writer. "tasks" gets one record per
-    # task; "findings"/"cves" are the flattened totals across all tasks.
+    """This is where we build up everything we've learned during the audit, one
+    piece at a time, so we can hand it all to the report writer at the end."""
     audit_data = {
         "target": args.target,
         "profile": profile,
@@ -77,31 +73,31 @@ def main():
     }
 
     # --- Steps 3-7: process one audit task at a time ---
-    for task_key in prompt_builder.task_keys():      # loop over the task names
+    for task_key in prompt_builder.task_keys():      # go through each task name, one at a time
         print(f"\n[*] Task '{task_key}': requesting audit script from local LLM...")
 
-        # A NESTED FUNCTION (a "closure"): it can see `profile` from the enclosing scope.
-        # WHY (logic): we pass this as a callback into the validator, which calls it once per attempt.
-        # SUBTLE SYNTAX: `_task_key=task_key` binds the CURRENT loop value as a default argument.
-        # Without this trick, the closure would read `task_key` LATE and every call would use the
-        # loop's FINAL value - a classic Python "late binding in loops" bug. The default captures it now.
+        """This helper function asks the AI to write the script for this one
+        task. We define it fresh inside the loop so it always remembers which
+        task it's working on, even though the validator is the one that
+        actually calls it."""
         def generate(feedback, _task_key=task_key):
             system_prompt, user_prompt = prompt_builder.build_task_prompt(
                 profile, _task_key, feedback=feedback
             )
-            if feedback:                             # truthy only on a retry
+            if feedback:                             # only true when we're retrying
                 print(f"    retrying '{_task_key}' with validator feedback...")
-            # Return the prompts plus the LLM's reply, packaged in one dict for the validator.
+            # Bundle everything the validator needs to check into one package.
             return {
                 "system_prompt": system_prompt,
                 "user_prompt": user_prompt,
                 "ai_response": ai_client.send(system_prompt, user_prompt),
             }
 
-        # The validator drives generate -> validate -> retry and returns a single outcome dict.
+        # Hand the "generate" helper to the validator, which will call it, check the
+        # result, and retry if needed, then give us back the final outcome.
         outcome = validator.validate_with_retries(generate)
 
-        # Record this task. "completed" if approved else "failed_validation" is a TERNARY expression.
+        # Keep a record of what happened for this task, for the report later.
         task_result = {
             "task": task_key,
             "system_prompt": outcome["system_prompt"],
@@ -115,16 +111,16 @@ def main():
             "cves": [],
         }
 
-        # If it never passed validation, log why and SKIP execution (the security guarantee).
+        # If the script never passed the safety check, note why and don't run it.
         if not outcome["approved"]:
             print(f"[!] Task '{task_key}' could not pass validation after "
                   f"{outcome['attempts']} attempt(s); skipping execution.")
             for issue in outcome["validation"]["issues"]:
                 print(f"    - {issue}")
-            audit_data["tasks"].append(task_result)  # still record the failed task for the report
-            continue                                 # `continue` jumps to the next loop iteration
+            audit_data["tasks"].append(task_result)  # still keep a record of the failed task
+            continue                                 # move on to the next task
 
-        # Approved: upload + run the script on the target, capture its output.
+        # It passed the safety check: upload and run the script on the target, and grab its output.
         print(f"[*] Task '{task_key}' approved on attempt {outcome['attempts']}. "
               f"Executing on target...")
         script_output = target_connector.execute_script(
@@ -135,15 +131,14 @@ def main():
             password=ssh_password,
         )
         task_result["script_output"] = script_output
-        # Parse the script's JSON output into structured findings/CVEs.
+        # Pull out the structured findings and CVE ids from what the script printed.
         task_result["findings"] = report_writer.extract_findings(script_output)
         task_result["cves"] = report_writer.extract_cves(script_output)
 
-        # list.extend(other_list) appends ALL items of the other list (vs .append, which adds one
-        # item). WHY: we're merging this task's findings into the running totals.
+        # Add this task's findings/CVEs onto the running totals for the whole audit.
         audit_data["findings"].extend(task_result["findings"])
         audit_data["cves"].extend(task_result["cves"])
-        audit_data["tasks"].append(task_result)      # store this task's full record
+        audit_data["tasks"].append(task_result)      # keep this task's full record
 
     # --- Step 8: persist the run log (JSON) and each generated script to disk ---
     log_path = report_writer.save_run_log(audit_data)
@@ -156,14 +151,13 @@ def main():
 
     # --- Step 10: print a short console summary ---
     tasks = audit_data["tasks"]
-    # sum(1 for t in tasks if ...) is a GENERATOR EXPRESSION feeding sum(): it yields a 1 for each
-    # task whose status is "completed", and sum adds them - a concise way to COUNT matching items.
+    # Count how many tasks ended up "completed".
     completed = sum(1 for t in tasks if t["status"] == "completed")
     incomplete = len(tasks) - completed
     print("\n[+] Audit complete.")
     print(f"    Target   : {args.target}")
     print(f"    OS       : {profile.get('os', 'unknown')} ({profile.get('platform', 'unknown')})")
-    # The (f"..." if incomplete else "") appends extra text ONLY when some tasks failed (a ternary).
+    # Only mention incomplete tasks if there actually were any.
     print(f"    Tasks    : {completed}/{len(tasks)} completed"
           + (f", {incomplete} could not be completed" if incomplete else ""))
     print(f"    Findings : {len(audit_data['findings'])}")
@@ -171,17 +165,17 @@ def main():
     print(f"[*] PDF report saved to: {args.output}")
 
 
-# `__name__` is a special variable Python sets to "__main__" when a file is RUN DIRECTLY, but to
-# the module's name when it is IMPORTED. So this block runs only for `python main.py`, not on import.
-# WHY: it lets a file be both an executable program and an importable module.
+"""This last bit only runs when you launch this file directly (like typing
+`python main.py`), not when some other file imports it. It's the program's
+actual "on" switch."""
 if __name__ == "__main__":
-    # try/except at the OUTERMOST level is a safety net: if anything inside main() raises (failed
-    # SSH, unreachable LLM, ...), we convert it into a clean error message + failure exit code
-    # instead of dumping a raw traceback.
+    """If anything goes wrong anywhere in main() - like the SSH connection
+    failing or the AI being unreachable - we catch it here so the user gets a
+    clean error message instead of a scary wall of technical text."""
     try:
         main()
-    except Exception as error:           # `Exception` catches all normal runtime errors; `as error` names it
+    except Exception as error:           # catch any normal error and give it the name "error"
         # [REQUIREMENT: Module sys] report on stderr, exit non-zero so callers know it failed.
         print(f"[FATAL] Audit aborted: {error}", file=sys.stderr)
         sys.exit(1)
-    sys.exit(0)                          # reached only on a clean run; exit code 0 = success
+    sys.exit(0)                          # only reached if everything went fine; 0 means success

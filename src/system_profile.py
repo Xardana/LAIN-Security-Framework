@@ -1,143 +1,129 @@
-# system_profile.py - turns the messy raw command output from target_connector into a
-# clean, structured dictionary. Architectural role: this is the "parsing/normalisation"
-# layer. The raw text differs wildly between OSes; everything downstream (prompts, report)
-# wants one tidy dict, so we isolate all the fragile text-wrangling here.
-# Security note: it only ever reads non-sensitive facts - never passwords/keys/cookies.
+"""
+system_profile.py turns the messy raw text we collected from the target
+machine into a clean, tidy dictionary. Different operating systems print
+their info in completely different formats, so we isolate all of that messy
+text-handling here, and everything downstream (the prompts, the report) just
+gets one neat, consistent dict to work with.
+Security note: this file only ever reads harmless facts - never passwords,
+keys, or cookies.
+"""
 
-import re        # [REQUIREMENT: Module] regular-expression engine for extracting values from text.
+import re        # [REQUIREMENT: Module] used to pull specific values out of blocks of text.
 
 
 def _first_line(text):
-    # WHY (logic): many commands print one useful line plus noise; this returns the first
-    # line that actually has content. A tiny helper reused all over this file (DRY principle).
-    # HOW (syntax): `text or ""` guards against text being None - None is "falsy", so the
-    # expression evaluates to "" and .splitlines() won't crash. str.splitlines() splits the
-    # string on line boundaries (\n, \r\n, ...) and returns a LIST of lines (no newline chars).
-    for line in (text or "").splitlines():
-        line = line.strip()                    # str.strip() returns a new string with edge whitespace removed
-        if line:                               # a non-empty string is truthy; this skips blank lines
-            return line                        # early return on the first real line
-    return ""                                  # loop finished with nothing found
+    """Many commands print one useful line plus a bunch of extra noise; this
+    just returns the first line that actually has something in it. It's a
+    tiny helper we reuse throughout this file."""
+    for line in (text or "").splitlines():      # treat missing text as empty, so this never crashes
+        line = line.strip()                    # trim extra spaces off both ends
+        if line:                               # skip blank lines
+            return line
+    return ""                                  # nothing useful was found
 
 
 def detect_platform(raw_data):
-    # WHY (logic): the single source of truth for "is this Linux or Windows." We decide it
-    # ONCE and reuse it, so the OS classification can never disagree between functions.
-    # HOW (syntax): str(...) is an explicit CAST [REQUIREMENT: Casting] - it converts whatever
-    # raw_data.get returns into a string so .lower() is safe even if the key is missing (None)
-    # or some non-string type. dict.get("platform", "") returns "" when the key is absent.
-    tag = str(raw_data.get("platform", "")).lower()   # .lower() returns a new lower-cased string
-    if "win" in tag:                                  # `in` on a string tests SUBSTRING membership
+    """This is the one place we decide whether the target is Linux or
+    Windows, so that decision can never disagree between different parts of
+    the program."""
+    tag = str(raw_data.get("platform", "")).lower()   # [REQUIREMENT: Casting]
+    if "win" in tag:                                  # does the tag mention Windows?
         return "windows"
-    if tag in ("unix", "linux", "darwin"):            # `in` on a tuple tests EQUALITY to any element
+    if tag in ("unix", "linux", "darwin"):            # any of the Unix-like names?
         return "linux"
 
-    # Fallback if the tag was missing/unknown: scan the OS banners themselves.
-    # f-string builds one combined string; .lower() normalises case for the substring test.
+    # If we still don't know, fall back to scanning the OS name itself.
     haystack = f"{raw_data.get('os', '')} {raw_data.get('os_release', '')}".lower()
     return "windows" if "windows" in haystack else "linux"
 
 
 def _parse_os_release(raw_data, platform):
-    # WHY (logic): produce a human-friendly OS name. Linux hides it in a PRETTY_NAME field;
-    # Windows/other cases just take the first line.
+    """Get a human-friendly OS name. On Linux it's usually tucked inside a
+    PRETTY_NAME field; on other platforms we just take the first line."""
     if platform == "linux":
-        # re.search(pattern, string) scans for the FIRST match anywhere and returns a Match
-        # object (or None). Pattern: PRETTY_NAME="..." where "?" makes the quote optional and
-        # ([^"\n]+) is a CAPTURE GROUP meaning "one or more characters that are NOT a quote or newline".
+        # Look for something like PRETTY_NAME="Ubuntu 22.04" and pull out just the name part.
         match = re.search(r'PRETTY_NAME="?([^"\n]+)"?', raw_data.get("os_release", ""))
-        if match:                                  # truthy only if something matched
-            return match.group(1).strip()          # .group(1) = the text captured by the first (...)
+        if match:                                  # did we find it?
+            return match.group(1).strip()
     return _first_line(raw_data.get("os_release", ""))
 
 
 def _parse_cpu(raw_data, platform):
-    # WHY (logic): pull a readable CPU model from very different command outputs.
+    """Pull a readable CPU model name out of very different command outputs
+    depending on the platform."""
     text = raw_data.get("cpu", "")
     if platform == "linux":
-        # \s* = zero-or-more whitespace; (.+) captures "one or more of any char" to end of line.
         match = re.search(r"Model name:\s*(.+)", text)
-        # Ternary: use the captured group if matched, else fall back to the first line.
+        # Use what we found, or just fall back to the first line if nothing matched.
         return match.group(1).strip() if match else _first_line(text)
-    match = re.search(r"Name=(.+)", text)               # Windows wmic prints "Name=<cpu>"
+    match = re.search(r"Name=(.+)", text)               # Windows prints "Name=<cpu>"
     return match.group(1).strip() if match else _first_line(text)
 
 
 def _parse_tools(raw_data):
-    # WHY (logic): the raw output is a list of full executable paths; we want just the tool
-    # NAMES, de-duplicated. This shows several core string operations chained together.
-    tools = []                                          # accumulator list we append to
+    """The raw output is a list of full file paths; we just want the plain
+    tool names, with no duplicates."""
+    tools = []                                          # the list we build up
     for line in (raw_data.get("tools", "")).splitlines():
-        # Build the basename by hand:
-        #   .replace("\\", "/")  -> normalise Windows backslashes to forward slashes
-        #   .rsplit("/", 1)      -> split from the RIGHT on "/", at most 1 time -> ["dir", "name"]
-        #   [-1]                 -> last element (negative indexing counts from the end)
+        # Take just the filename part of the path, whether it uses "/" or "\".
         name = line.strip().replace("\\", "/").rsplit("/", 1)[-1]
-        # .lower() normalises case; .removesuffix(".exe") strips a trailing ".exe" if present
-        # (added in Python 3.9; returns the string unchanged if the suffix isn't there).
+        # Lowercase it and drop a trailing ".exe" if it has one.
         name = name.lower().removesuffix(".exe")
-        if name and name not in tools:                  # skip blanks AND duplicates (`not in` = membership test)
-            tools.append(name)                          # list.append adds one item to the end
+        if name and name not in tools:                  # skip blanks and anything we've already added
+            tools.append(name)
     return tools
 
 
 def _parse_privilege(raw_data, platform):
-    # WHY (logic): summarise the user's permission level from `whoami`.
-    # _first_line uses str() internally; .lower() normalises the account name.
+    """Summarize how much access the current user has, based on `whoami`."""
     user = _first_line(raw_data.get("whoami", "")).lower()
     if platform == "linux":
-        # str.endswith(suffix) returns True/False. On Linux, root is the privileged account.
+        # On Linux, "root" is the fully privileged account.
         return "root" if user.endswith("root") else "non-root"
-    # On Windows, whoami alone can't prove admin rights, so we just report the account name.
-    # `user or "unknown"` yields "unknown" when user is an empty string.
+    # On Windows, the username alone doesn't tell us if they're an admin, so just report the name.
     return user or "unknown"
 
 
 def _parse_network(raw_data, platform):
-    # WHY (logic): collect ONLY interface names (eth0, Wi-Fi) - deliberately not IPs - so the
-    # profile stays non-sensitive. Demonstrates re.findall, which returns EVERY match.
+    """Collect only the network interface names (like eth0 or Wi-Fi) -
+    deliberately not IP addresses - so the profile stays free of sensitive
+    details."""
     text = raw_data.get("network", "")
     interfaces = []
     if platform == "linux":
-        # re.findall returns a LIST of all matches (just the captured group when one (...) exists).
-        # r"^\d+:\s*([^:@\s]+)" with re.MULTILINE: ^ matches the start of EACH line (not just the
-        # whole string); \d+ = one-or-more digits; then capture the name (chars that aren't :@/space).
-        names = re.findall(r"^\d+:\s*([^:@\s]+)", text, re.MULTILINE)   # matches "2: eth0:"
-        # `+=` on a list EXTENDS it with the items of the right-hand list (ifconfig-style fallback).
-        names += re.findall(r"^(\w+):\s+flags=", text, re.MULTILINE)
+        # Matches lines like "2: eth0:" and pulls out just the interface name.
+        names = re.findall(r"^\d+:\s*([^:@\s]+)", text, re.MULTILINE)
+        names += re.findall(r"^(\w+):\s+flags=", text, re.MULTILINE)  # fallback format some tools use
     else:
-        # LIST COMPREHENSION: "[expression for item in iterable]" builds a new list in one line.
-        # Here it strips whitespace from each adapter name found by findall.
-        names = [m.strip() for m in re.findall(r"adapter\s+(.+?):", text)]  # "Ethernet adapter X:"
+        # Matches lines like "Ethernet adapter Wi-Fi:" and pulls out the adapter name.
+        names = [m.strip() for m in re.findall(r"adapter\s+(.+?):", text)]
     for name in names:
-        if name and name not in interfaces:             # dedupe while PRESERVING order
+        if name and name not in interfaces:             # keep the order, but skip duplicates
             interfaces.append(name)
     return interfaces
 
 
 def _parse_packages(raw_data):
-    # WHY (logic): turn `pip list` output into "name==version" strings, skipping the header,
-    # the dashed separator, and any pip warning/notice lines (which aren't packages).
+    """Turn the output of `pip list` into "name==version" strings, skipping
+    the header row, the separator line, and anything that isn't really a package."""
     packages = []
     for line in (raw_data.get("packages", "")).splitlines():
-        parts = line.split()                            # str.split() with no arg splits on ANY whitespace
-        # A genuine package row is "<name> <version>" AND the version starts with a digit.
-        # re.match anchors at the START of the string (parts[1]); we just need the first char to be \d.
-        # `len(parts) >= 2 and ...` short-circuits: if there's only one token, the regex isn't even checked.
+        parts = line.split()                            # split on any whitespace
+        # A real package row looks like "<name> <version>", and the version starts with a digit.
         if len(parts) >= 2 and re.match(r"\d", parts[1]):
             packages.append(f"{parts[0]}=={parts[1]}")  # e.g. "numpy==1.26.0"
     return packages
 
 
 def parse(raw_data):
-    # WHY (logic): the ONLY public function (main.py calls this). It orchestrates the helpers
-    # above and returns a single dict that prompt_builder and report_writer both consume.
-    # Returning a plain dict (vs a custom class) keeps the data trivially serialisable to JSON.
-    raw_data = raw_data or {}                           # guard: if None, use an empty dict
-    platform = detect_platform(raw_data)                # compute once, pass into the helpers
+    """The one function everything else calls. It runs all the helpers above
+    and returns a single, clean dict that both prompt_builder and
+    report_writer can use."""
+    raw_data = raw_data or {}                           # treat missing data as an empty dict
+    platform = detect_platform(raw_data)                # figure this out once, and reuse it below
 
-    # A dict literal. Each value is produced by a focused helper, so this function reads like
-    # a table of contents for the profile.
+    # Each value below comes from one of the small helper functions above, so this
+    # reads like a table of contents for everything we know about the target.
     return {
         "platform": platform,
         "os": _first_line(raw_data.get("os", "")) or "unknown",

@@ -7,7 +7,7 @@ flowchart TD
     E{"Loop: for each of<br/>6 audit tasks"}
     F["prompt_builder.build_task_prompt<br/>OS-aware chunk + safety rules + JSON contract"]
     G["ai_client.send<br/>OpenAI library client"]
-    H[("Local LLM<br/>foundation-sec 8B<br/>192.168.1.103 via .env")]
+    H[("Local LLM<br/>foundation-sec 8B<br/>via .env")]
     I["validator.validate<br/>8 blocked-pattern categories"]
     J{"Approved?"}
     L["target_connector.execute_script<br/>SSH run on target · temp file · auto-cleanup"]
