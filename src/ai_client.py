@@ -18,6 +18,11 @@ load_dotenv()
 
 DEFAULT_MODEL = "huihui_ai/foundation-sec-abliterated"
 
+"""How long, in seconds, we'll wait for the AI to answer before giving up. A local
+model writing a whole script takes a while, so this is generous - but it has to
+have *some* limit, or a stalled server would leave this program waiting forever."""
+REQUEST_TIMEOUT = 180
+
 """We only want to set up the connection to the AI once and reuse it, instead of
 setting it up again every time. This variable is where we keep that saved connection."""
 _client = None
@@ -40,7 +45,7 @@ def _get_client():
         api_key = os.environ.get("AI_API_KEY", "ollama")
         """Now we actually create the connection to the AI server, using the web
         address and key from above, and save it so we don't have to do this again."""
-        _client = OpenAI(base_url=base_url, api_key=api_key)
+        _client = OpenAI(base_url=base_url, api_key=api_key, timeout=REQUEST_TIMEOUT)
     return _client                       # give back the saved connection
 
 
