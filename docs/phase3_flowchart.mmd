@@ -1,0 +1,90 @@
+flowchart TD
+    %% ============ CURRENT FUNCTIONAL ELEMENTS (Phase 2 — working now) ============
+    A["CLI Entry: main.py<br/>argument parsing · exit codes · stderr"]
+    B["target_connector.py<br/>SSH connect · agent-first auth"]
+    C["collect_system_info<br/>read-only enumeration<br/>Linux and Windows"]
+    D["system_profile.parse<br/>structured profile + platform detection"]
+    E{"Loop: for each of<br/>6 audit tasks"}
+    F["prompt_builder.build_task_prompt<br/>OS-aware chunk + safety rules + JSON contract"]
+    G["ai_client.send<br/>OpenAI library client"]
+    H[("Local LLM<br/>foundation-sec 8B<br/>via .env")]
+    I["validator.validate<br/>8 blocked-pattern categories"]
+    J{"Approved?"}
+    L["target_connector.execute_script<br/>SSH run on target · temp file · auto-cleanup"]
+    M["report_writer.extract_findings<br/>extract_cves · JSON parse"]
+    RES[("Per-task result<br/>status · findings · CVEs")]
+    N["report_writer<br/>save_run_log JSON +<br/>save_generated_scripts"]
+    O["write_pdf_report<br/>paginated PDF · fpdf2"]
+
+    A --> B --> C --> D --> E
+    E -->|"per task"| F --> G --> H --> I --> J
+    J -->|"rejected: feedback retry, max 3"| F
+    J -->|"approved"| L --> M --> RES
+    J -->|"3 failures: mark NOT COMPLETED"| RES
+    RES --> E
+    E ==>|"all tasks complete"| N
+    N --> O
+
+    %% ============ PHASE 3 — FINAL SHOWCASE: ADAPTIVE AUDITING FRAMEWORK ============
+    subgraph PHASE3["★ PHASE 3 — FINAL SHOWCASE · Adaptive Auditing Framework (Not Yet Built)"]
+        direction TB
+
+        subgraph ADAPT["1 · Adaptive Script Generation"]
+            direction TB
+            AG1["OS-tier routing<br/>distinct Windows vs Linux script categories"]
+            AG2["Resource-tier routing<br/>lightweight checks on low-memory hosts,<br/>detailed checks on powerful hosts"]
+            AG3["Script category chosen dynamically<br/>from the system profile"]
+            AG1 --> AG3
+            AG2 --> AG3
+        end
+
+        subgraph VALID["2 · Enhanced Validation and Sandbox"]
+            direction TB
+            EV1["Restricted-action scan<br/>(expanded categories)"]
+            EV2["Imported-module review<br/>allowlist"]
+            EV3["File-system access limits"]
+            EV4["Manual confirmation<br/>before execution"]
+            EV5[("Temporary workspace<br/>isolate · log · delete after test")]
+            EV1 --> EV2 --> EV3 --> EV4 --> EV5
+        end
+
+        subgraph REPORT["3 · Explainable Reporting"]
+            direction TB
+            ER1["Reasoning section<br/>why this script fits this machine"]
+            ER2["Narrative: info collected · script type<br/>· checks performed · results found"]
+            ER1 --> ER2
+        end
+
+        subgraph LAB["4 · Lab Testing and Deliverables"]
+            direction TB
+            LT1["Authorized lab VMs<br/>at least 1 Windows + 1 Linux"]
+            LT2["Cross-OS comparison<br/>AI-generated vs static-script relevance"]
+            LT3[/"Deliverables bundle<br/>source · sample scripts · logs/reports<br/>· docs · security and ethics discussion"/]
+            LT1 --> LT2 --> LT3
+        end
+    end
+
+    %% --- how Phase 3 work extends the current pipeline (dotted = enhances) ---
+    D -.->|"profile drives tier/category"| ADAPT
+    ADAPT -.->|"selected script category"| F
+    VALID -.->|"hardens the gate"| I
+    EV5 -.->|"sandbox for"| L
+    REPORT -.->|"enriches"| O
+    O -.->|"runs feed the comparison"| LAB
+
+    %% ============ STYLING ============
+    classDef current fill:#e8f0fe,stroke:#1a3d7c,stroke-width:1px,color:#10243e;
+    classDef store fill:#eef6ee,stroke:#1f6b1f,stroke-width:1px,color:#10331a;
+    classDef future fill:#fff4e5,stroke:#b35900,stroke-width:3px,stroke-dasharray:6 4,color:#5a3000;
+    classDef artifact fill:#fdeaea,stroke:#a40000,stroke-width:3px,stroke-dasharray:6 4,color:#5a0000;
+
+    class A,B,C,D,E,F,G,I,J,L,M,N,O current;
+    class H,RES store;
+    class AG1,AG2,AG3,EV1,EV2,EV3,EV4,EV5,ER1,ER2,LT1,LT2 future;
+    class LT3 artifact;
+
+    style PHASE3 fill:#fff8ec,stroke:#b35900,stroke-width:2px,stroke-dasharray:6 4,color:#5a3000;
+    style ADAPT fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style VALID fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style REPORT fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
+    style LAB fill:#fffdf7,stroke:#b35900,stroke-width:1px,stroke-dasharray:4 3,color:#5a3000;
