@@ -116,6 +116,43 @@ def _run_command_set(client, commands):
     return raw_data
 
 
+def run_commands(host, username, commands, key_path=None, password=None):
+    """Run a batch of read-only commands and report exactly how each one went.
+
+    This is what the collectors use. It differs from _run_command_set above in
+    one important way: it keeps the error output AND the exit code, not just
+    whatever was printed. That sounds like a detail but it's the whole point.
+    A command that fails often still prints something, and treating that
+    something as a result is precisely how we ended up reporting a strict
+    firewall policy based on the text of an error message. With the exit code
+    in hand, the collectors can tell "I looked and found nothing" apart from
+    "I was not allowed to look", which are very different answers."""
+    client = _connect(host, username, key_path, password)
+    try:
+        results = {}
+        for label, command in commands.items():
+            try:
+                _, stdout, stderr = client.exec_command(command, timeout=COMMAND_TIMEOUT)
+                output = _read_text(stdout)
+                errors = _read_text(stderr)
+                """Ask the channel how the command actually ended. 0 means success;
+                anything else means it failed, however chatty it was on the way out."""
+                exit_code = stdout.channel.recv_exit_status()
+            except socket.timeout:
+                output, errors, exit_code = "", f"timed out after {COMMAND_TIMEOUT}s", -1
+            except paramiko.SSHException as problem:
+                output, errors, exit_code = "", f"ssh error: {problem}", -1
+            results[label] = {
+                "stdout": output,
+                "stderr": errors,
+                "exit_code": exit_code,
+                "command": command,
+            }
+        return results
+    finally:
+        client.close()
+
+
 def collect_system_info(host, username, key_path=None, password=None):
     """The public "read" step. This always closes the connection when it's
     done, even if something goes wrong partway through."""
