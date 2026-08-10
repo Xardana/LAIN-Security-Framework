@@ -8,8 +8,9 @@ import json
 import os
 import re
 
-from dotenv import load_dotenv   # a helper library that reads secret settings from a ".env" file.
-from openai import OpenAI        # the toolkit we use to talk to the AI model over the internet.
+from dotenv import load_dotenv        # a helper library that reads secret settings from a ".env" file.
+from openai import OpenAI             # the toolkit we use to talk to the AI model over the internet.
+from openai import BadRequestError    # the specific error a server gives when it dislikes our request.
 
 
 """ This runs first: it opens the .env file and loads its settings so the rest of the program can use them."""
@@ -22,6 +23,12 @@ DEFAULT_MODEL = "huihui_ai/foundation-sec-abliterated"
 model writing a whole script takes a while, so this is generous - but it has to
 have *some* limit, or a stalled server would leave this program waiting forever."""
 REQUEST_TIMEOUT = 180
+
+"""How much creative freedom the AI gets, from 0 to 1. We keep it low on purpose.
+We're not asking for imaginative writing, we're asking for a script in a strict
+format, so we want the most predictable answer it can give us rather than a
+surprising one."""
+TEMPERATURE = 0.2
 
 """We only want to set up the connection to the AI once and reuse it, instead of
 setting it up again every time. This variable is where we keep that saved connection."""
@@ -49,6 +56,16 @@ def _get_client():
     return _client                       # give back the saved connection
 
 
+def _ask(client, model, messages, force_json):
+    """Actually send the question. `force_json` asks the server to guarantee the
+    reply is valid JSON, which saves us a lot of guesswork later. Not every server
+    understands that request, which is why the caller below is ready for it to fail."""
+    settings = {"model": model, "messages": messages, "temperature": TEMPERATURE}
+    if force_json:
+        settings["response_format"] = {"type": "json_object"}
+    return client.chat.completions.create(**settings)
+
+
 def send(system_prompt, user_prompt, model=None):
     """This is the one function everyone else in the program uses to talk to the
     AI. You give it two pieces of text, and it takes care of everything else:
@@ -59,16 +76,23 @@ def send(system_prompt, user_prompt, model=None):
     use the one saved in the settings, otherwise fall back to our default choice."""
     model = model or os.environ.get("AI_MODEL", DEFAULT_MODEL)
 
-    """This sends our question to the AI over the internet and waits for its answer.
-    We send two messages: one that tells the AI how to behave (the "system" message),
-    and one with the actual question we want answered (the "user" message)."""
-    response = client.chat.completions.create(
-        model=model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-    )
+    """We send two messages: one that tells the AI how to behave (the "system"
+    message), and one with the actual question we want answered (the "user" message)."""
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_prompt},
+    ]
+
+    try:
+        # Preferred: ask the server to force the reply into valid JSON.
+        response = _ask(client, model, messages, force_json=True)
+    except BadRequestError:
+        """The server rejected our request outright, which almost always means this
+        version doesn't support the "must be JSON" option. Rather than fail the whole
+        run over a nice-to-have, we just ask again the plain way and rely on our own
+        parsing below. We only catch this one specific error on purpose - a timeout
+        or a connection problem should still be reported, not quietly retried."""
+        response = _ask(client, model, messages, force_json=False)
 
     """The AI's answer comes back packaged inside a bunch of layers. Here we dig
     through those layers to pull out just the plain text of its reply."""
@@ -76,27 +100,45 @@ def send(system_prompt, user_prompt, model=None):
     return _parse_response(content)      # turn that plain text into something usable
 
 
+def _as_dict(text):
+    """Try to read some text as a JSON object. Gives back the object if it worked,
+    or None if it didn't, so the caller can simply move on to the next approach.
+
+    Note we insist on an *object* specifically. Valid JSON can also be a bare
+    string or a list, and those would sail through json.loads and then break
+    everything downstream that expects to look up "script" on the result."""
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None                      # not JSON at all
+    return data if isinstance(data, dict) else None
+
+
 def _parse_response(content):
     """Small AI models don't always give back clean, tidy answers - sometimes they
     wrap the answer in extra explanation or formatting. So we try a few different
     ways of reading the answer, from strictest to most forgiving, until one works."""
 
+    """The model can hand back nothing at all - an empty reply, or literally no text.
+    That used to crash the whole program with a confusing error about JSON, so we
+    catch it here and return an empty script instead. The validator will then reject
+    it with a clear "nothing to run" message, and the normal retry kicks in."""
+    if not content:
+        return {"script": "", "explanation": "", "raw_response": ""}
+
     # --- First try: hope the whole answer is already in the clean format we want. ---
-    try:
-        return json.loads(content)
-    except json.JSONDecodeError:
-        pass                             # that didn't work, so try the next approach
+    data = _as_dict(content)
+    if data is not None:
+        return _normalize(data, content)
 
     """--- Second try: look for the answer tucked inside a code block. ---
     Sometimes the AI wraps its answer in a fenced code block. This searches the
     text for that pattern and pulls out just the part inside it."""
     json_block = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", content, re.DOTALL)
     if json_block:                       # did we find something that looks like that?
-        try:
-            json_block.group(1)  # the part inside the code block
-            return json.loads(json_block.group(1))
-        except json.JSONDecodeError:
-            pass
+        data = _as_dict(json_block.group(1))
+        if data is not None:
+            return _normalize(data, content)
 
     # --- Last resort: give up on finding a clean format, and just treat the reply as the script itself. ---
     code_block = re.search(r"```(?:python)?\s*(.*?)```", content, re.DOTALL)
@@ -104,4 +146,18 @@ def _parse_response(content):
 
     """Hand back the answer in a consistent format, keeping the original raw
     text too, in case we need it later for a report or for troubleshooting."""
-    return {"script": script, "raw_response": content}
+    return {"script": script, "explanation": "", "raw_response": content}
+
+
+def _normalize(data, content):
+    """Make sure whatever the AI gave us always comes back in the same shape, with
+    "script" and "explanation" as plain text. Everything downstream - the validator
+    and the report - assumes those are strings, so a model that nests an object in
+    there would otherwise cause a crash a long way from the actual cause."""
+    script = data.get("script", "")
+    explanation = data.get("explanation", "")
+    # [REQUIREMENT: Casting] force whatever we got into text before anyone uses it.
+    data["script"] = script if isinstance(script, str) else str(script)
+    data["explanation"] = explanation if isinstance(explanation, str) else str(explanation)
+    data.setdefault("raw_response", content)   # keep the original for the report
+    return data

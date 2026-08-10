@@ -6,6 +6,7 @@ ever runs, and give the AI a limited number of chances to fix its mistakes
 and try again.
 """
 
+import ast        # reads Python code as structure, so we can tell real code from prose.
 import io         # lets us hand a plain string to something that expects a file.
 import re         # [REQUIREMENT: Module] the regex engine. We build each pattern once and reuse it.
 import tokenize   # takes Python code apart into labelled pieces, so we can spot the comments.
@@ -141,6 +142,25 @@ def _strip_comments(script):
     return "\n".join(lines)
 
 
+def _syntax_error(script):
+    """Check whether this is even valid Python. Gives back a short description of
+    the problem, or None if the code is fine.
+
+    This matters more than it sounds. If the AI refuses a task, it replies with a
+    polite sentence, and that sentence ends up in the "script" slot. Plain English
+    contains none of our banned patterns, so it used to sail through as approved,
+    get uploaded to the target, and die there with a confusing syntax error. Now we
+    catch it here and can say plainly that the model refused."""
+    try:
+        ast.parse(script)
+    except SyntaxError as error:
+        return f"line {error.lineno}: {error.msg}"
+    except ValueError as error:
+        # Rare, but source containing null bytes raises this instead of SyntaxError.
+        return str(error)
+    return None                # parsed fine, so it really is Python
+
+
 def validate(script):
     """Check one script and give back a verdict: whether it's approved, and
     why or why not. Giving back the actual reasons (not just yes/no) lets us
@@ -151,6 +171,16 @@ def validate(script):
     # An empty script can never be run, so reject it right away without checking anything else.
     if not script or not script.strip():
         return {"approved": False, "issues": ["Empty script: nothing to run."], "warnings": []}
+
+    """Make sure this is actually Python before anything else. We record the problem
+    but deliberately keep checking below rather than stopping here, so that a reply
+    which is both non-Python *and* full of dangerous commands reports both facts."""
+    syntax_problem = _syntax_error(script)
+    if syntax_problem:
+        issues.append(
+            f"not_python: the reply is not valid Python, which usually means the "
+            f"model refused the task or its answer was cut off ({syntax_problem})."
+        )
 
     # Judge only the code that actually runs - a comment mentioning "sudo" is not a real risk.
     code = _strip_comments(script)

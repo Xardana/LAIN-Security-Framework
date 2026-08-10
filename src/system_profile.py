@@ -77,11 +77,76 @@ def _parse_tools(raw_data):
 def _parse_privilege(raw_data, platform):
     """Summarize how much access the current user has, based on `whoami`."""
     user = _first_line(raw_data.get("whoami", "")).lower()
+    if not user:                                   # the command gave us nothing back
+        return "unknown"
     if platform == "linux":
-        # On Linux, "root" is the fully privileged account.
-        return "root" if user.endswith("root") else "non-root"
+        """On Linux, "root" is the fully privileged account. We check for an exact
+        match rather than "ends with root", because plenty of ordinary accounts are
+        named things like chroot, nonroot or notroot, and those were all being
+        reported as fully privileged."""
+        return "root" if user == "root" else "non-root"
     # On Windows, the username alone doesn't tell us if they're an admin, so just report the name.
-    return user or "unknown"
+    return user
+
+
+def _kb_to_gib(text):
+    """Windows reports memory in kilobytes, which is not much use to a human.
+    This turns it into gigabytes, and gives back an empty string if the value
+    wasn't a number we could work with."""
+    try:
+        # [REQUIREMENT: Casting] text -> whole number -> a rounded, readable string.
+        return f"{int(text) / (1024 * 1024):.1f}Gi"
+    except (TypeError, ValueError):
+        return ""
+
+
+def _parse_memory(raw_data, platform):
+    """Pull the actual memory numbers out of the command output.
+
+    This used to just take the first line, which on Linux is the column headings
+    ("total used free shared buff/cache available") rather than any real numbers,
+    so every report showed those words where the RAM should have been."""
+    text = raw_data.get("memory", "")
+
+    if platform == "linux":
+        """We match the numbers to the column *headings* instead of counting
+        positions along the line. That sounds fussy, but counting positions is
+        exactly how this goes wrong: older versions of `free` print
+        "total used free shared buffers cached", while newer ones print
+        "total used free shared buff/cache available". Position 6 is the cached
+        amount on one and the available amount on the other, so anything that
+        assumes a fixed position silently reports the wrong number on half the
+        machines it ever runs on - and looks perfectly fine doing it."""
+        headings = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped:
+                continue
+            if not stripped.lower().startswith("mem:"):
+                headings = stripped.split()        # remember the most recent heading row
+                continue
+            # Drop the "Mem:" label, then pair each number with its own heading.
+            numbers = stripped.split()[1:]
+            columns = dict(zip(headings, numbers))
+            total = columns.get("total", "")
+            available = columns.get("available", "")   # simply absent on older versions
+            if total and available:
+                return f"{total} total, {available} available"
+            return total
+        return ""                                  # no "Mem:" line found at all
+
+    """Windows prints this as "Name=value" lines instead, so we read them into a
+    small lookup and then convert the numbers into something readable."""
+    values = {}
+    for line in text.splitlines():
+        key, separator, value = line.partition("=")
+        if separator:                              # only keep real "key=value" lines
+            values[key.strip()] = value.strip()
+    total = _kb_to_gib(values.get("TotalVisibleMemorySize"))
+    free = _kb_to_gib(values.get("FreePhysicalMemory"))
+    if total and free:
+        return f"{total} total, {free} free"
+    return total or free                           # whichever one we managed to read
 
 
 def _parse_network(raw_data, platform):
@@ -132,7 +197,7 @@ def parse(raw_data):
         "python_version": _first_line(raw_data.get("python_version", "")),
         "privilege": _parse_privilege(raw_data, platform),
         "cpu": _parse_cpu(raw_data, platform),
-        "memory": _first_line(raw_data.get("memory", "")),
+        "memory": _parse_memory(raw_data, platform),
         "tools": _parse_tools(raw_data),
         "network": _parse_network(raw_data, platform),
         "packages": _parse_packages(raw_data),
