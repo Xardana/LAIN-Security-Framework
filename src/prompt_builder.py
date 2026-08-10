@@ -54,6 +54,11 @@ FINDINGS_SCHEMA = (
 OUTPUT_CONTRACT = (
     "Reply with ONLY a JSON object, no prose, in this exact shape:\n"
     '{"script": "<python3 source>", "explanation": "<one sentence>"}\n'
+    # Models habitually present code in markdown fences, and they do it inside the
+    # JSON string too, which leaves us with something that isn't valid Python. We
+    # strip those off in ai_client anyway, but asking here saves a wasted round-trip.
+    "The \"script\" value must be raw Python source starting at the first line of "
+    "code. Do NOT wrap it in markdown code fences or backticks.\n"
     "The script must run under python3, use only the standard library, and wrap "
     "every check in try/except so one failure never stops the rest. The script "
     "must print EXACTLY ONE JSON object to stdout and nothing else, in this "

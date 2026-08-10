@@ -149,6 +149,24 @@ def _parse_response(content):
     return {"script": script, "explanation": "", "raw_response": content}
 
 
+def _strip_code_fence(text):
+    """Take the markdown wrapper off a script, if the model added one.
+
+    Models are trained to present code in "fences" - three backticks, often with a
+    language name like ```python - because that's how code looks on a web page. The
+    trouble is it does this *inside* the JSON too, so the script we get reads
+    "```python3\\nimport os..." instead of starting at the actual code. That is
+    perfectly good JSON and completely invalid Python, so it failed every safety
+    check on the first try and cost us a wasted round-trip on every single task."""
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return text                            # no wrapper, nothing to do
+    lines = stripped.splitlines()[1:]          # drop the opening ``` line and its language tag
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]                     # drop the closing ``` line if it's there
+    return "\n".join(lines)
+
+
 def _normalize(data, content):
     """Make sure whatever the AI gave us always comes back in the same shape, with
     "script" and "explanation" as plain text. Everything downstream - the validator
@@ -157,7 +175,8 @@ def _normalize(data, content):
     script = data.get("script", "")
     explanation = data.get("explanation", "")
     # [REQUIREMENT: Casting] force whatever we got into text before anyone uses it.
-    data["script"] = script if isinstance(script, str) else str(script)
+    script = script if isinstance(script, str) else str(script)
+    data["script"] = _strip_code_fence(script)     # ...and unwrap it if it arrived in markdown
     data["explanation"] = explanation if isinstance(explanation, str) else str(explanation)
     data.setdefault("raw_response", content)   # keep the original for the report
     return data
