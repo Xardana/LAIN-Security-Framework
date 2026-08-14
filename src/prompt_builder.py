@@ -12,6 +12,8 @@ exact same wording is used every time, so the AI behaves consistently, and we
 never have to retype it. Wrapping the text in parentheses across several lines
 just lets us write one long block of text without needing a "+" on every line."""
 
+import json   # used to show the collected facts to the AI as clean, structured text.
+
 ROLE = (
     "You are a defensive security auditor working on an explicitly authorized, "
     "read-only audit. You write small READ-ONLY Python scripts that inspect a "
@@ -48,6 +50,38 @@ FINDINGS_SCHEMA = (
     "Rules for this output: use an empty findings list when nothing notable is "
     "found; severity must be exactly one of the listed words; include cves only "
     "when a specific CVE applies, otherwise use an empty list."
+)
+
+"""--- The interpretation path (new in Phase 3). ---
+These three blocks are for the newer, safer way of working. Instead of asking the
+AI to write a script that goes and digs facts out of the machine, our own code
+collects the facts first, and then we ask the AI only to make sense of them. It
+never runs or writes any code on this path, so there is nothing to validate and
+nothing that can go wrong on the target. The facts are the same on every run, so
+the findings stop drifting from one run to the next."""
+INTERPRET_ROLE = (
+    "You are a defensive security auditor reviewing facts that were already "
+    "collected from a single authorized machine by trusted, read-only tools. You "
+    "never run code and you never write code. Your only job is to read the "
+    "collected facts and decide which ones are worth reporting, how serious each "
+    "one is, and why."
+)
+
+INTERPRET_RULES = (
+    "How to judge, never break these:\n"
+    "- Base every finding ONLY on the facts given below. Never invent a detail "
+    "and never assume anything that is not shown in the data.\n"
+    "- Normal, expected things are not findings. A standard system account or a "
+    "stock SUID binary is not noteworthy on its own; say so by leaving it out.\n"
+    "- If a section says something could not be checked, report that as a gap in "
+    "coverage, not as a security problem that was found.\n"
+    "- Put the exact fact you relied on in the evidence field, so a human can "
+    "trace every finding straight back to the collected data."
+)
+
+INTERPRET_CONTRACT = (
+    "Reply with ONLY a JSON object, no prose and no code, in this exact shape:\n"
+    + FINDINGS_SCHEMA
 )
 
 # This glues the schema above onto the end of the instructions below it.
@@ -191,3 +225,47 @@ def build_task_prompt(profile, task_key, feedback=None):
         )
     # Return both pieces of text: the role/rules text, and the specific request (joined with blank lines).
     return build_system_prompt(), "\n\n".join(parts)
+
+
+def _records_block(records, limit=40):
+    """Show the collected records as JSON for the prompt, capped so a long list
+    (every pending package, say) can't crowd everything else out. We cap by whole
+    records rather than by character count, so what the AI reads is always valid,
+    complete JSON and never a structure chopped off in the middle."""
+    shown = records[:limit]
+    text = json.dumps(shown, indent=2)
+    if len(records) > limit:
+        text += f"\n... and {len(records) - limit} more not shown ({len(records)} total)."
+    return text
+
+
+def build_interpretation_prompt(profile, task_key, collector_result):
+    """Build the two prompts for the interpretation path: we hand the AI the facts
+    our own collectors already gathered, plus a note of anything that couldn't be
+    checked, and ask it only to judge them. `collector_result` is exactly what a
+    Collector.collect() call returns - its records and its errors."""
+    task = AUDIT_TASKS.get(task_key, {})
+    # Fall back to the collector's own description if this isn't one of the named tasks.
+    topic = task.get("ask") or collector_result.get("description", task_key)
+    records = collector_result.get("records", [])
+    errors = collector_result.get("errors", [])
+
+    # Build the request piece by piece, then join it together at the end.
+    parts = [
+        "Target machine profile:\n" + _profile_summary(profile),
+        "Audit topic: " + topic,
+    ]
+    if records:
+        parts.append("Collected facts (JSON):\n" + _records_block(records))
+    else:
+        # "We looked and found nothing" is a real answer, and we say it plainly so
+        # the AI doesn't go hunting for a problem that the data doesn't support.
+        parts.append("Collected facts: none were found for this topic.")
+    if errors:
+        """List what couldn't be checked, so the AI reports it as a coverage gap
+        instead of either ignoring it or inventing a finding to fill the space."""
+        parts.append("Could not be checked:\n" + "\n".join(f"- {issue}" for issue in errors))
+    parts.append("Interpret these facts into findings now. Do not write any code.")
+
+    system_prompt = "\n\n".join([INTERPRET_ROLE, INTERPRET_RULES, INTERPRET_CONTRACT])
+    return system_prompt, "\n\n".join(parts)
