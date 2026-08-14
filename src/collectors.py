@@ -219,6 +219,22 @@ def _parse_local_accounts(outputs):
 # File permissions
 # --------------------------------------------------------------------------
 
+def _is_only_permission_noise(stderr):
+    """Decide whether a command's complaints are the boring, expected kind.
+
+    `find` walks the filesystem as an ordinary user and grumbles every time it
+    meets a folder it isn't allowed to open. That is completely normal and it
+    still makes `find` exit with a failure code. If we take that code at face
+    value we end up announcing that the check failed when it actually ran fine
+    and simply found nothing - which is the very "found nothing" versus "wasn't
+    allowed to look" confusion this whole file exists to prevent."""
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    if not lines:
+        return True                                # nothing was complained about at all
+    harmless = ("permission denied", "no such file or directory", "not a directory")
+    return all(any(phrase in line.lower() for phrase in harmless) for line in lines)
+
+
 def _parse_permissions(outputs):
     """Find files with the SUID bit set, and files anyone can write to.
 
@@ -231,10 +247,11 @@ def _parse_permissions(outputs):
 
     for label, kind in (("suid", "suid"), ("world_writable", "world_writable")):
         stdout, stderr, exit_code = _output(outputs, label)
-        """`find` returns a non-zero code just for hitting folders it can't read,
-        which is completely normal as a non-root user. So we only treat it as a
-        real failure if it also gave us nothing at all."""
-        if exit_code != 0 and not stdout.strip():
+        """Only call it a real failure if the command complained about something
+        we didn't expect. An empty result with nothing but permission grumbles
+        means the search genuinely ran and there was nothing to find, which is a
+        perfectly good answer and should not be dressed up as an error."""
+        if exit_code != 0 and not _is_only_permission_noise(stderr):
             errors.append(_failed(label, f"find ({kind})", stderr, exit_code))
             continue
         for line in stdout.splitlines():
@@ -368,9 +385,11 @@ LINUX_COLLECTORS = {
     ),
     "weak_permissions": Collector(
         "weak_permissions", "Files with the SUID bit set, and world-writable files",
+        # Deliberately NOT hiding errors here. We need to see what find complained
+        # about to tell "there was nothing to find" apart from "find couldn't run".
         {
-            "suid": "find /usr/bin /usr/sbin /bin /sbin -xdev -perm -4000 -type f 2>/dev/null",
-            "world_writable": "find /etc /usr/bin /usr/sbin -xdev -perm -0002 -type f 2>/dev/null",
+            "suid": "find /usr/bin /usr/sbin /bin /sbin -xdev -perm -4000 -type f",
+            "world_writable": "find /etc /usr/bin /usr/sbin -xdev -perm -0002 -type f",
         },
         _parse_permissions,
     ),
