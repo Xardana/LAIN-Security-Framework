@@ -1,0 +1,280 @@
+"""
+This file writes out the instructions we send the AI. It doesn't touch the network
+(ai_client does that) and it doesn't run anything, it only builds text. Keeping the
+wording in one place makes it easy to tweak what we tell the AI without poking at any
+other code. We keep the wording short on purpose, since the model we use is a small
+one.
+
+The instructions are built from a few fixed blocks of text joined together each time.
+Writing them once up here means the exact same wording goes out every run, so the AI
+stays consistent and we never retype it. The parentheses spanning several lines are
+just a way to write one long string without a "+" on every line.
+"""
+
+import json   # used to show the collected facts to the AI as clean, structured text.
+
+ROLE = (
+    "You are a defensive security auditor working on an explicitly authorized, "
+    "read-only audit. You write small READ-ONLY Python scripts that inspect a "
+    "single authorized machine and report findings. You only audit; you never "
+    "change the system and you never produce exploit code."
+)
+
+# The "\n" bits are line breaks, so this reads as a tidy bullet list for the AI.
+SAFETY_RULES = (
+    "Hard rules, never break them:\n"
+    "- READ-ONLY only. Never write, move, delete, or modify any file or setting.\n"
+    "- No exploitation or exploit code, and no destructive actions of any kind.\n"
+    "- No privilege escalation, no sudo/runas, no credential, token, key, or cookie reading.\n"
+    "- No persistence, no new users, and no stealth or evasion techniques.\n"
+    "- No unauthorized network scanning and no connections to other hosts.\n"
+    "- No disabling of security tools. No eval/exec of downloaded code.\n"
+    "- If a check would require any of the above, skip it and note why instead."
+)
+
+# We make the AI print its results in this exact shape every time, so report_writer
+# can read every task the same way instead of guessing at whatever format the AI felt
+# like using.
+FINDINGS_SCHEMA = (
+    "{\n"
+    '  "task": "<this task name>",\n'
+    '  "findings": [\n'
+    '    {"title": "<short title>",\n'
+    '     "severity": "info|low|medium|high|critical",\n'
+    '     "detail": "<what was found, one or two sentences>",\n'
+    '     "evidence": "<the raw value or command output it is based on>",\n'
+    '     "cves": ["CVE-0000-0000"]}\n'
+    "  ]\n"
+    "}\n"
+    "Rules for this output: use an empty findings list when nothing notable is "
+    "found; severity must be exactly one of the listed words; include cves only "
+    "when a specific CVE applies, otherwise use an empty list."
+)
+
+# The interpretation path (new in Phase 3). These three blocks are for the newer,
+# safer way of working. Instead of asking the AI to write a script that digs facts out
+# of the machine, our own code collects the facts first and the AI only makes sense of
+# them. Nothing runs or gets written on the target on this path, so there's nothing to
+# validate and nothing that can go wrong out there. And the facts are the same every
+# run, so the findings stop drifting.
+INTERPRET_ROLE = (
+    "You are a defensive security auditor reviewing facts that were already "
+    "collected from a single authorized machine by trusted, read-only tools. You "
+    "never run code and you never write code. Your only job is to read the "
+    "collected facts and decide which ones are worth reporting, how serious each "
+    "one is, and why."
+)
+
+INTERPRET_RULES = (
+    "How to judge, never break these:\n"
+    "- Base every finding ONLY on the facts given below. Never invent a detail "
+    "and never assume anything that is not shown in the data.\n"
+    "- Normal, expected things are not findings. A standard system account, or a "
+    "SUID file whose is_standard field is true, is not noteworthy on its own; "
+    "leave it out.\n"
+    "- A missing or unknown process name is normal when auditing without root "
+    "access. Do NOT raise severity just because the process is unknown; judge by "
+    "the port and the address instead.\n"
+    "- A recognised service on its well-known port (the well_known_service field "
+    "is filled in) is expected, and a listener that is only on loopback "
+    "(is_loopback is true) cannot be reached from other machines. Treat these as "
+    "routine: report them at 'info' at most, or leave them out.\n"
+    "- A listener on an UNRECOGNISED port (well_known_service is empty) that is "
+    "exposed on all interfaces (address 0.0.0.0 or ::) deserves attention even if "
+    "its process is unknown - that is exactly what a hidden service looks like.\n"
+    "- When several facts describe the same thing - the same port on IPv4 and "
+    "IPv6, or one service on several addresses - report them as ONE finding, not "
+    "one per line.\n"
+    "- If a section says something could not be checked, report that as a gap in "
+    "coverage, not as a security problem that was found.\n"
+    "- Put the exact fact you relied on in the evidence field, so a human can "
+    "trace every finding straight back to the collected data."
+)
+
+INTERPRET_CONTRACT = (
+    "Reply with ONLY a JSON object, no prose and no code, in this exact shape:\n"
+    + FINDINGS_SCHEMA
+)
+
+# Sticks the schema above onto the end of the instructions below.
+OUTPUT_CONTRACT = (
+    "Reply with ONLY a JSON object, no prose, in this exact shape:\n"
+    '{"script": "<python3 source>", "explanation": "<one sentence>"}\n'
+    # Models love wrapping code in markdown fences, and they do it inside the JSON
+    # string too, which leaves us with something that isn't valid Python. We strip
+    # those in ai_client anyway, but asking here saves a wasted round-trip.
+    "The \"script\" value must be raw Python source starting at the first line of "
+    "code. Do NOT wrap it in markdown code fences or backticks.\n"
+    "The script must run under python3, use only the standard library, and wrap "
+    "every check in try/except so one failure never stops the rest. The script "
+    "must print EXACTLY ONE JSON object to stdout and nothing else, in this "
+    "shape:\n" + FINDINGS_SCHEMA
+)
+
+# Per-OS hints. We attach exactly one of these based on the detected platform.
+LINUX_HINTS = (
+    "Target is Linux. Prefer reading /etc, /proc and standard files, or running "
+    "read-only commands (uname, id, ss, systemctl is-enabled, sysctl) via "
+    "subprocess with a timeout. Do not assume root."
+)
+
+WINDOWS_HINTS = (
+    "Target is Windows. Prefer read-only PowerShell/CIM queries (Get-CimInstance, "
+    "Get-LocalUser, Get-NetTCPConnection, Get-MpComputerStatus) or 'reg query' "
+    "run via subprocess with a timeout. Do not assume Administrator."
+)
+
+# The list of audit tasks. Each name points to a small dict holding what to ask for,
+# plus a Linux hint and a Windows hint. Keeping all this in one place means we can add
+# or drop a task just by editing this list, without touching the code below.
+AUDIT_TASKS = {
+    "patch_status": {
+        "ask": "Check the OS patch / update status and report pending security updates.",
+        "linux": "Use the available package manager read-only (apt list --upgradable, dnf check-update, or rpm -qa) without installing anything.",
+        "windows": "Query installed hotfixes via Get-HotFix and the last update time; do not trigger any update.",
+    },
+    "listening_ports": {
+        "ask": "List listening network ports and the owning process for each.",
+        "linux": "Parse `ss -tulpn` or read /proc/net/tcp; do not open any socket yourself.",
+        "windows": "Use Get-NetTCPConnection where State is Listen, joined to the owning process name.",
+    },
+    "local_accounts": {
+        "ask": "Report local user accounts, which have admin/root rights, and which can log in.",
+        "linux": "Read /etc/passwd and group membership (sudo/wheel); never read /etc/shadow.",
+        "windows": "Use Get-LocalUser and Get-LocalGroupMember for Administrators; never read password hashes.",
+    },
+    "weak_permissions": {
+        "ask": "Find obviously over-permissive items: world-writable files in system paths or risky service configs.",
+        "linux": "Stat key paths and report world-writable or SUID files in /etc, /usr/bin; read-only stat only.",
+        "windows": "Report services whose binary path is in a user-writable location, read-only via Get-CimInstance Win32_Service.",
+    },
+    "firewall_status": {
+        "ask": "Report whether the host firewall is enabled and summarize its default policy.",
+        "linux": "Query ufw status or `nft list ruleset` / `iptables -S` read-only; do not change rules.",
+        "windows": "Use Get-NetFirewallProfile to report Enabled state and default actions per profile.",
+    },
+    "running_services": {
+        "ask": "List services/daemons set to start automatically and flag any uncommon ones.",
+        "linux": "Use `systemctl list-unit-files --state=enabled` read-only.",
+        "windows": "Use Get-Service / Get-CimInstance Win32_Service filtered to StartMode Auto.",
+    },
+}
+
+
+def _platform(profile):
+    """Work out Linux or Windows so we can attach the right hint. Trust the profile's
+    own "platform" field first, and only guess from the OS name as a backup."""
+    platform = str(profile.get("platform", "")).lower()  # [REQUIREMENT: Casting]
+    if platform in ("linux", "windows"):     # already one of the two we expect?
+        return platform
+    return "windows" if "win" in str(profile.get("os", "")).lower() else "linux"
+
+
+def _profile_summary(profile):
+    """Turn the profile into a short bullet list for the prompt. We keep it small on
+    purpose, a small model does much better with a short focused prompt than a big pile
+    of data."""
+    fields = ("os", "os_release", "arch", "python_version", "privilege", "tools")  # which fields to show
+    lines = []                               # one line per field that's actually there
+    for field in fields:
+        value = profile.get(field)
+        if value:                            # skip anything empty or missing
+            # [REQUIREMENT: Casting] cap each line's length so nothing runs away.
+            lines.append(f"- {field}: {str(value).strip()[:200]}")
+    network = profile.get("network")
+    if network:
+        # Fold the list of interface names into one comma-separated line.
+        lines.append(f"- network interfaces: {', '.join(network)[:200]}")
+    packages = profile.get("packages")
+    if packages:
+        sample = ", ".join(packages[:15])    # only show the first 15 packages
+        lines.append(f"- python packages ({len(packages)} installed): {sample[:200]}")
+    # Join the bullets with line breaks, or show a placeholder if there's nothing.
+    return "\n".join(lines) if lines else "- (no profile details available)"
+
+
+def build_system_prompt():
+    """The AI's role instructions are the same for every task, so just glue the three
+    blocks together with a blank line between each."""
+    return "\n\n".join([ROLE, SAFETY_RULES, OUTPUT_CONTRACT])
+
+
+def task_keys():
+    """Hand back the list of task names, so main.py can loop over them without knowing
+    about the whole AUDIT_TASKS dict."""
+    return list(AUDIT_TASKS.keys())
+
+
+def build_task_prompt(profile, task_key, feedback=None):
+    """Build the two bits of text we send for one task: the role/rules text, and the
+    specific request. `feedback` is optional, empty on the first try and filled with
+    the validator's complaints when we're asking the AI to try again."""
+    if task_key not in AUDIT_TASKS:                 # bail early on a task name we don't know
+        raise KeyError(f"Unknown audit task: {task_key}")
+
+    platform = _platform(profile)                   # "linux" or "windows"
+    task = AUDIT_TASKS[task_key]                     # safe to grab directly, we just checked it exists
+    os_hint = LINUX_HINTS if platform == "linux" else WINDOWS_HINTS   # pick the matching hint
+
+    # Build the request piece by piece, then join it at the end.
+    parts = [
+        "Target machine profile:\n" + _profile_summary(profile),
+        os_hint,
+        "Audit task: " + task["ask"],
+        "Guidance: " + task[platform],
+        "Write the read-only Python audit script for this one task now.",
+    ]
+    if feedback:                                    # only set on a retry
+        # Tell the AI exactly what it got wrong last time, so its next try has a much
+        # better shot at passing the safety check.
+        parts.append(
+            "Your previous attempt was REJECTED by the safety validator for:\n"
+            + "\n".join(f"- {issue}" for issue in feedback)
+            + "\nRewrite the script so it does none of these; keep it read-only."
+        )
+    # Hand back both bits: the role/rules text, and the specific request.
+    return build_system_prompt(), "\n\n".join(parts)
+
+
+def _records_block(records, limit=40):
+    """Show the collected records as JSON for the prompt, capped so a long list (every
+    pending package, say) can't crowd out everything else. We cap by whole records, not
+    by character count, so what the AI reads is always complete valid JSON and never a
+    structure chopped off mid-way."""
+    shown = records[:limit]
+    text = json.dumps(shown, indent=2)
+    if len(records) > limit:
+        text += f"\n... and {len(records) - limit} more not shown ({len(records)} total)."
+    return text
+
+
+def build_interpretation_prompt(profile, task_key, collector_result):
+    """Build the two prompts for the interpretation path: hand the AI the facts our
+    collectors already gathered, plus a note of anything we couldn't check, and ask it
+    only to judge them. `collector_result` is exactly what a Collector.collect() call
+    returns, its records and its errors."""
+    task = AUDIT_TASKS.get(task_key, {})
+    # Fall back to the collector's own description if this isn't a named task.
+    topic = task.get("ask") or collector_result.get("description", task_key)
+    records = collector_result.get("records", [])
+    errors = collector_result.get("errors", [])
+
+    # Build the request piece by piece, then join it at the end.
+    parts = [
+        "Target machine profile:\n" + _profile_summary(profile),
+        "Audit topic: " + topic,
+    ]
+    if records:
+        parts.append("Collected facts (JSON):\n" + _records_block(records))
+    else:
+        # "We looked and found nothing" is a real answer, so we say it plainly, so the
+        # AI doesn't go hunting for a problem the data doesn't support.
+        parts.append("Collected facts: none were found for this topic.")
+    if errors:
+        # List what we couldn't check, so the AI reports it as a coverage gap instead
+        # of ignoring it or inventing a finding to fill the space.
+        parts.append("Could not be checked:\n" + "\n".join(f"- {issue}" for issue in errors))
+    parts.append("Interpret these facts into findings now. Do not write any code.")
+
+    system_prompt = "\n\n".join([INTERPRET_ROLE, INTERPRET_RULES, INTERPRET_CONTRACT])
+    return system_prompt, "\n\n".join(parts)
