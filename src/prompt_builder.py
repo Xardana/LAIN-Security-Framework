@@ -1,16 +1,15 @@
 """
-prompt_builder.py writes out the instructions we send to the AI. It doesn't
-talk to the network (ai_client.py does that) and it doesn't run any scripts -
-it only builds text. Keeping the wording separate from everything else makes
-it easy to tweak what we tell the AI without touching any other code. We keep
-the wording short on purpose, since the AI model we're using is a small one.
-"""
+This file writes out the instructions we send the AI. It doesn't touch the network
+(ai_client does that) and it doesn't run anything, it only builds text. Keeping the
+wording in one place makes it easy to tweak what we tell the AI without poking at any
+other code. We keep the wording short on purpose, since the model we use is a small
+one.
 
-"""The instructions we send the AI are built from a few fixed blocks of text,
-joined together each time. Writing them once at the top of the file means the
-exact same wording is used every time, so the AI behaves consistently, and we
-never have to retype it. Wrapping the text in parentheses across several lines
-just lets us write one long block of text without needing a "+" on every line."""
+The instructions are built from a few fixed blocks of text joined together each time.
+Writing them once up here means the exact same wording goes out every run, so the AI
+stays consistent and we never retype it. The parentheses spanning several lines are
+just a way to write one long string without a "+" on every line.
+"""
 
 import json   # used to show the collected facts to the AI as clean, structured text.
 
@@ -21,7 +20,7 @@ ROLE = (
     "change the system and you never produce exploit code."
 )
 
-# The "\n" bits are line breaks, so this prints as a neat bullet list for the AI to read.
+# The "\n" bits are line breaks, so this reads as a tidy bullet list for the AI.
 SAFETY_RULES = (
     "Hard rules, never break them:\n"
     "- READ-ONLY only. Never write, move, delete, or modify any file or setting.\n"
@@ -33,9 +32,9 @@ SAFETY_RULES = (
     "- If a check would require any of the above, skip it and note why instead."
 )
 
-"""We ask the AI's generated script to always print its results in this exact
-shape, so that report_writer can read every task's results the same way,
-instead of having to guess at whatever format the AI feels like using."""
+# We make the AI print its results in this exact shape every time, so report_writer
+# can read every task the same way instead of guessing at whatever format the AI felt
+# like using.
 FINDINGS_SCHEMA = (
     "{\n"
     '  "task": "<this task name>",\n'
@@ -52,13 +51,12 @@ FINDINGS_SCHEMA = (
     "when a specific CVE applies, otherwise use an empty list."
 )
 
-"""--- The interpretation path (new in Phase 3). ---
-These three blocks are for the newer, safer way of working. Instead of asking the
-AI to write a script that goes and digs facts out of the machine, our own code
-collects the facts first, and then we ask the AI only to make sense of them. It
-never runs or writes any code on this path, so there is nothing to validate and
-nothing that can go wrong on the target. The facts are the same on every run, so
-the findings stop drifting from one run to the next."""
+# The interpretation path (new in Phase 3). These three blocks are for the newer,
+# safer way of working. Instead of asking the AI to write a script that digs facts out
+# of the machine, our own code collects the facts first and the AI only makes sense of
+# them. Nothing runs or gets written on the target on this path, so there's nothing to
+# validate and nothing that can go wrong out there. And the facts are the same every
+# run, so the findings stop drifting.
 INTERPRET_ROLE = (
     "You are a defensive security auditor reviewing facts that were already "
     "collected from a single authorized machine by trusted, read-only tools. You "
@@ -98,13 +96,13 @@ INTERPRET_CONTRACT = (
     + FINDINGS_SCHEMA
 )
 
-# This glues the schema above onto the end of the instructions below it.
+# Sticks the schema above onto the end of the instructions below.
 OUTPUT_CONTRACT = (
     "Reply with ONLY a JSON object, no prose, in this exact shape:\n"
     '{"script": "<python3 source>", "explanation": "<one sentence>"}\n'
-    # Models habitually present code in markdown fences, and they do it inside the
-    # JSON string too, which leaves us with something that isn't valid Python. We
-    # strip those off in ai_client anyway, but asking here saves a wasted round-trip.
+    # Models love wrapping code in markdown fences, and they do it inside the JSON
+    # string too, which leaves us with something that isn't valid Python. We strip
+    # those in ai_client anyway, but asking here saves a wasted round-trip.
     "The \"script\" value must be raw Python source starting at the first line of "
     "code. Do NOT wrap it in markdown code fences or backticks.\n"
     "The script must run under python3, use only the standard library, and wrap "
@@ -113,7 +111,7 @@ OUTPUT_CONTRACT = (
     "shape:\n" + FINDINGS_SCHEMA
 )
 
-# --- Per-OS guidance. We attach exactly one of these depending on the detected platform. ---
+# Per-OS hints. We attach exactly one of these based on the detected platform.
 LINUX_HINTS = (
     "Target is Linux. Prefer reading /etc, /proc and standard files, or running "
     "read-only commands (uname, id, ss, systemctl is-enabled, sysctl) via "
@@ -126,10 +124,9 @@ WINDOWS_HINTS = (
     "run via subprocess with a timeout. Do not assume Administrator."
 )
 
-"""--- The list of audit tasks. Each task name points to a small dict holding
-what to ask for, plus a Linux hint and a Windows hint. Keeping all of this data
-in one place means we can add or remove a task just by editing this list,
-without touching any of the code below. ---"""
+# The list of audit tasks. Each name points to a small dict holding what to ask for,
+# plus a Linux hint and a Windows hint. Keeping all this in one place means we can add
+# or drop a task just by editing this list, without touching the code below.
 AUDIT_TASKS = {
     "patch_status": {
         "ask": "Check the OS patch / update status and report pending security updates.",
@@ -165,63 +162,61 @@ AUDIT_TASKS = {
 
 
 def _platform(profile):
-    """Figure out whether the target is Linux or Windows, so we can attach the
-    right hint. We trust the profile's own "platform" field first, and only
-    guess from the OS name as a backup."""
+    """Work out Linux or Windows so we can attach the right hint. Trust the profile's
+    own "platform" field first, and only guess from the OS name as a backup."""
     platform = str(profile.get("platform", "")).lower()  # [REQUIREMENT: Casting]
-    if platform in ("linux", "windows"):     # is it already one of the two values we expect?
+    if platform in ("linux", "windows"):     # already one of the two we expect?
         return platform
     return "windows" if "win" in str(profile.get("os", "")).lower() else "linux"
 
 
 def _profile_summary(profile):
-    """Turn the target's profile into a short bullet-point list to include in
-    the prompt. We keep it small on purpose - a small AI model works much
-    better with a short, focused prompt than a huge pile of data."""
+    """Turn the profile into a short bullet list for the prompt. We keep it small on
+    purpose, a small model does much better with a short focused prompt than a big pile
+    of data."""
     fields = ("os", "os_release", "arch", "python_version", "privilege", "tools")  # which fields to show
-    lines = []                               # one formatted line per field that's actually present
+    lines = []                               # one line per field that's actually there
     for field in fields:
         value = profile.get(field)
         if value:                            # skip anything empty or missing
-            # [REQUIREMENT: Casting] cap each line's length so nothing gets too long.
+            # [REQUIREMENT: Casting] cap each line's length so nothing runs away.
             lines.append(f"- {field}: {str(value).strip()[:200]}")
     network = profile.get("network")
     if network:
-        # Turn the list of network names into one comma-separated line.
+        # Fold the list of interface names into one comma-separated line.
         lines.append(f"- network interfaces: {', '.join(network)[:200]}")
     packages = profile.get("packages")
     if packages:
         sample = ", ".join(packages[:15])    # only show the first 15 packages
         lines.append(f"- python packages ({len(packages)} installed): {sample[:200]}")
-    # Stitch the bullet points together with line breaks; show a placeholder if there's nothing to show.
+    # Join the bullets with line breaks, or show a placeholder if there's nothing.
     return "\n".join(lines) if lines else "- (no profile details available)"
 
 
 def build_system_prompt():
-    """The instructions for the AI's "role" are the same for every task, so we
-    just glue the three text blocks together with a blank line between each."""
+    """The AI's role instructions are the same for every task, so just glue the three
+    blocks together with a blank line between each."""
     return "\n\n".join([ROLE, SAFETY_RULES, OUTPUT_CONTRACT])
 
 
 def task_keys():
-    """Give back the list of task names, so main.py can loop through them
-    without needing to know about the whole AUDIT_TASKS list itself."""
+    """Hand back the list of task names, so main.py can loop over them without knowing
+    about the whole AUDIT_TASKS dict."""
     return list(AUDIT_TASKS.keys())
 
 
 def build_task_prompt(profile, task_key, feedback=None):
-    """Build the two pieces of text we send the AI for one task: the role/rules
-    text, and the specific request for this task. `feedback` is optional - it's
-    left empty on the first try, and filled in with the validator's complaints
-    if we're asking the AI to try again."""
-    if task_key not in AUDIT_TASKS:                 # stop early if we're given a task name we don't know
+    """Build the two bits of text we send for one task: the role/rules text, and the
+    specific request. `feedback` is optional, empty on the first try and filled with
+    the validator's complaints when we're asking the AI to try again."""
+    if task_key not in AUDIT_TASKS:                 # bail early on a task name we don't know
         raise KeyError(f"Unknown audit task: {task_key}")
 
     platform = _platform(profile)                   # "linux" or "windows"
-    task = AUDIT_TASKS[task_key]                     # safe to look up directly; we already checked it exists
+    task = AUDIT_TASKS[task_key]                     # safe to grab directly, we just checked it exists
     os_hint = LINUX_HINTS if platform == "linux" else WINDOWS_HINTS   # pick the matching hint
 
-    # Build the request to the AI piece by piece, then join it all together at the end.
+    # Build the request piece by piece, then join it at the end.
     parts = [
         "Target machine profile:\n" + _profile_summary(profile),
         os_hint,
@@ -229,23 +224,23 @@ def build_task_prompt(profile, task_key, feedback=None):
         "Guidance: " + task[platform],
         "Write the read-only Python audit script for this one task now.",
     ]
-    if feedback:                                    # only true if this is a retry
-        """Tell the AI exactly what it did wrong last time, so its next attempt
-        has a much better chance of passing the safety check."""
+    if feedback:                                    # only set on a retry
+        # Tell the AI exactly what it got wrong last time, so its next try has a much
+        # better shot at passing the safety check.
         parts.append(
             "Your previous attempt was REJECTED by the safety validator for:\n"
             + "\n".join(f"- {issue}" for issue in feedback)
             + "\nRewrite the script so it does none of these; keep it read-only."
         )
-    # Return both pieces of text: the role/rules text, and the specific request (joined with blank lines).
+    # Hand back both bits: the role/rules text, and the specific request.
     return build_system_prompt(), "\n\n".join(parts)
 
 
 def _records_block(records, limit=40):
-    """Show the collected records as JSON for the prompt, capped so a long list
-    (every pending package, say) can't crowd everything else out. We cap by whole
-    records rather than by character count, so what the AI reads is always valid,
-    complete JSON and never a structure chopped off in the middle."""
+    """Show the collected records as JSON for the prompt, capped so a long list (every
+    pending package, say) can't crowd out everything else. We cap by whole records, not
+    by character count, so what the AI reads is always complete valid JSON and never a
+    structure chopped off mid-way."""
     shown = records[:limit]
     text = json.dumps(shown, indent=2)
     if len(records) > limit:
@@ -254,17 +249,17 @@ def _records_block(records, limit=40):
 
 
 def build_interpretation_prompt(profile, task_key, collector_result):
-    """Build the two prompts for the interpretation path: we hand the AI the facts
-    our own collectors already gathered, plus a note of anything that couldn't be
-    checked, and ask it only to judge them. `collector_result` is exactly what a
-    Collector.collect() call returns - its records and its errors."""
+    """Build the two prompts for the interpretation path: hand the AI the facts our
+    collectors already gathered, plus a note of anything we couldn't check, and ask it
+    only to judge them. `collector_result` is exactly what a Collector.collect() call
+    returns, its records and its errors."""
     task = AUDIT_TASKS.get(task_key, {})
-    # Fall back to the collector's own description if this isn't one of the named tasks.
+    # Fall back to the collector's own description if this isn't a named task.
     topic = task.get("ask") or collector_result.get("description", task_key)
     records = collector_result.get("records", [])
     errors = collector_result.get("errors", [])
 
-    # Build the request piece by piece, then join it together at the end.
+    # Build the request piece by piece, then join it at the end.
     parts = [
         "Target machine profile:\n" + _profile_summary(profile),
         "Audit topic: " + topic,
@@ -272,12 +267,12 @@ def build_interpretation_prompt(profile, task_key, collector_result):
     if records:
         parts.append("Collected facts (JSON):\n" + _records_block(records))
     else:
-        # "We looked and found nothing" is a real answer, and we say it plainly so
-        # the AI doesn't go hunting for a problem that the data doesn't support.
+        # "We looked and found nothing" is a real answer, so we say it plainly, so the
+        # AI doesn't go hunting for a problem the data doesn't support.
         parts.append("Collected facts: none were found for this topic.")
     if errors:
-        """List what couldn't be checked, so the AI reports it as a coverage gap
-        instead of either ignoring it or inventing a finding to fill the space."""
+        # List what we couldn't check, so the AI reports it as a coverage gap instead
+        # of ignoring it or inventing a finding to fill the space.
         parts.append("Could not be checked:\n" + "\n".join(f"- {issue}" for issue in errors))
     parts.append("Interpret these facts into findings now. Do not write any code.")
 

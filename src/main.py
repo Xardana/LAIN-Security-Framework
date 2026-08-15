@@ -1,42 +1,40 @@
 """
-main.py is the starting point of the program. It doesn't do much work itself -
-instead it calls the other files in the right order, kind of like a recipe that
-tells each helper when to do its job.
+This is where the program starts. It doesn't do much itself, it just calls the other
+files in the right order, like a recipe telling each helper when to do its bit.
 
-How the audit now works (Phase 3)
----------------------------------
-The earlier version asked the AI to write a script for each check, validated the
-script, ran it on the target, and read whatever it printed. Testing showed the
-scripts were safe but frequently wrong: they misread command output, and two
-runs of the same audit disagreed with each other.
+How the audit works now (Phase 3):
+The old version asked the AI to write a script for each check, validated it, ran it on
+the target, and read what it printed. Testing showed those scripts were safe but often
+wrong. They misread the command output, and two runs of the same audit disagreed with
+each other.
 
-So the flow changed. Now our own code (collectors.py) gathers the raw facts
-using fixed, read-only commands, and the AI's only job is to look at those facts
-and decide what is worth reporting. The facts are identical every run, so the
-findings stop drifting, and the AI is doing the part it is actually good at -
-judgement, not parsing.
+So we changed the flow. Now our own code (collectors.py) gathers the raw facts with
+fixed, read-only commands, and the AI's only job is to look at those facts and decide
+what's worth reporting. The facts are identical every run, so the findings stop
+drifting, and the AI does the part it's actually good at, which is judgement, not
+parsing.
 
-  collect profile -> run collector commands -> parse facts -> AI interprets facts -> report
+  collect profile -> run collector commands -> parse facts -> AI interprets -> report
 """
 
-import argparse   # a library that reads the options typed on the command line.
+import argparse   # reads the options typed on the command line.
 import os          # [REQUIREMENT: Module os] os.environ reads the optional SSH password.
-import sys         # [REQUIREMENT: Module sys] sys.exit (process exit codes) + sys.stderr (error stream).
+import sys         # [REQUIREMENT: Module sys] sys.exit (exit codes) + sys.stderr (error stream).
 
-# Bring in the helper files. Each one has one job.
-import target_connector   # SSH: read info from the target and run our collector commands
-import system_profile     # parse raw output into a clean profile dict
-import collectors         # our own deterministic fact-gathering (replaces AI-written scripts)
-import prompt_builder     # build the LLM prompts
-import ai_client          # send prompts to the LLM
-import report_writer      # save logs + write the PDF
+# The helper files, one job each.
+import target_connector   # SSH: read info off the target and run our collector commands
+import system_profile     # turn raw output into a clean profile dict
+import collectors         # our own fact-gathering that gives the same answer every time
+import prompt_builder     # build the prompts
+import ai_client          # send the prompts to the AI
+import report_writer      # save logs and write the PDF
 
 
-"""[REQUIREMENT: Functions] The program is split into functions so that "reading the
-command-line options" and "running the audit" each stay short and easy to follow."""
+# [REQUIREMENT: Functions] The program is split into functions so "read the options"
+# and "run the audit" each stay short and easy to follow.
 def parse_args():
-    """This sets up the command-line options the program accepts, like --target
-    and --user, and describes what each one is for."""
+    """Set up the command-line options, like --target and --user, and say what each
+    one is for."""
     parser = argparse.ArgumentParser(
         description="Defensive AI Audit Framework - runs on controller, audits remote targets over SSH"
     )
@@ -48,15 +46,14 @@ def parse_args():
         "--depth", choices=["auto", "lightweight", "detailed"], default="auto",
         help="How thorough to be. 'auto' (the default) decides from the target's own resources.",
     )
-    # This reads whatever the user typed and hands back a neat object with each option on it.
+    # Read whatever was typed and hand back a neat object with each option on it.
     return parser.parse_args()
 
 
 def _findings_from_reply(reply):
-    """Pull the list of findings out of the AI's interpretation reply, being
-    forgiving about the exact shape it comes back in. A well-behaved reply is
-    {"task": ..., "findings": [...]}, but we also accept a bare list, and treat
-    anything else as "no findings" rather than crashing."""
+    """Pull the findings list out of the AI's reply, without being fussy about the
+    exact shape. A tidy reply is {"task": ..., "findings": [...]}, but we also take a
+    bare list, and treat anything else as "no findings" rather than crashing."""
     if isinstance(reply, dict) and isinstance(reply.get("findings"), list):
         return reply["findings"]
     if isinstance(reply, list):
@@ -65,10 +62,10 @@ def _findings_from_reply(reply):
 
 
 def _interpret_one(profile, name, result):
-    """Ask the AI to interpret one collector's facts, and package the outcome in
-    the shape report_writer expects. Kept as its own function so a failure to
-    interpret one check (say the AI call times out) records that cleanly and the
-    rest of the audit carries on."""
+    """Ask the AI to interpret one collector's facts, and package the result in the
+    shape report_writer wants. It's its own function so that if one check fails to
+    interpret (say the AI call times out), we record that cleanly and the rest of the
+    audit carries on."""
     system_prompt, user_prompt = prompt_builder.build_interpretation_prompt(profile, name, result)
     try:
         reply = ai_client.send(system_prompt, user_prompt)
@@ -77,14 +74,14 @@ def _interpret_one(profile, name, result):
         # Carry any coverage gaps the collector reported through to the report.
         validation = {"approved": True, "issues": result.get("errors", []), "warnings": []}
     except Exception as error:
-        """One interpretation failing shouldn't sink the whole run. We record it as
-        a not-completed task with the reason, and keep going."""
+        # One check failing shouldn't sink the whole run. Record it as not-completed
+        # with the reason, and keep going.
         reply = {"error": str(error)}
         findings = []
         status = "failed_interpretation"
         validation = {"approved": False, "issues": [f"AI interpretation failed: {error}"], "warnings": []}
 
-    # CVE ids gathered from this check's findings, de-duplicated and sorted.
+    # CVE ids from this check's findings, de-duplicated and sorted.
     cves = sorted({cve for finding in findings for cve in finding["cves"]})
 
     return {
@@ -102,14 +99,14 @@ def _interpret_one(profile, name, result):
 
 
 def main():
-    args = parse_args()                              # the orchestration begins
+    args = parse_args()                              # here we go
 
-    # Look up an optional password from the environment; if it's not set, this is just empty.
+    # Grab an optional password from the environment. If it's not set, this is just empty.
     ssh_password = os.environ.get("SSH_PASSWORD")
 
     print(f"[*] Starting audit of target: {args.target}")
 
-    # --- Step 1: SSH in and collect raw, read-only system information ---
+    # Step 1: SSH in and collect raw, read-only system info.
     raw_data = target_connector.collect_system_info(
         host=args.target,
         username=args.user,
@@ -117,25 +114,24 @@ def main():
         password=ssh_password,
     )
 
-    # If nothing came back, there's nothing to do, so stop here.
+    # Nothing came back means nothing to do, so stop here.
     if not raw_data:
-        """If something goes wrong, we want the program to clearly say so and exit
-        with an error status, so anything watching this program knows the run failed."""
+        # Say so clearly and exit with an error status, so anything watching this
+        # program knows the run failed.
         print("[ERROR] No system information collected from target.", file=sys.stderr)
         sys.exit(1)
 
-    # --- Step 2: Parse the raw output into a structured profile dict ---
-    profile = system_profile.parse(raw_data)         # also figures out linux vs windows
+    # Step 2: turn the raw output into a clean profile.
+    profile = system_profile.parse(raw_data)         # also works out linux vs windows
     print(f"[*] System profile collected: {profile.get('os', 'unknown')} "
           f"/ {profile.get('arch', 'unknown')} ({profile.get('platform', 'unknown')})")
 
-    # --- Decide how deep to go: honour --depth, or let the profile decide ---
+    # Decide how deep to go: use --depth if given, otherwise let the profile decide.
     depth = args.depth if args.depth != "auto" else collectors.resource_tier(profile)
     chosen_by = "set by --depth" if args.depth != "auto" else "chosen from target resources"
     print(f"[*] Audit depth: {depth} ({chosen_by})")
 
-    """This is where we build up everything we've learned during the audit, so we
-    can hand it all to the report writer at the end."""
+    # This is where we pile up everything we learn, to hand off to the report writer.
     audit_data = {
         "target": args.target,
         "profile": profile,
@@ -145,18 +141,18 @@ def main():
         "cves": [],
     }
 
-    # --- Step 3: pick the collectors that suit this machine's operating system ---
+    # Step 3: pick the collectors that suit this machine's OS.
     platform = profile.get("platform", "linux")
     active_collectors = collectors.for_platform(platform)
 
     if not active_collectors:
-        """We don't have collectors for this OS yet (Windows is still to come). We
-        still write a report so there's an artifact showing what was and wasn't done,
-        rather than failing silently."""
+        # No collectors for this OS yet (Windows is still to come). We still write a
+        # report so there's an artifact showing what did and didn't happen, rather than
+        # failing quietly.
         print(f"[!] No collectors available for platform '{platform}' yet; "
               f"the profile was captured but no checks were run.")
     else:
-        # --- Step 4: run every collector's commands (at the chosen depth) over ONE SSH connection ---
+        # Step 4: run every collector's commands (at the chosen depth) over ONE SSH connection.
         commands = collectors.all_commands(active_collectors, depth)
         print(f"[*] Collecting facts over SSH ({len(active_collectors)} checks, "
               f"{len(commands)} commands)...")
@@ -168,10 +164,10 @@ def main():
             password=ssh_password,
         )
 
-        # --- Step 5: parse the raw output into deterministic facts ---
+        # Step 5: turn the raw output into deterministic facts.
         results = collectors.collect_all(active_collectors, outputs, depth)
 
-        # --- Step 6: have the AI interpret each check's facts into findings ---
+        # Step 6: have the AI interpret each check's facts into findings.
         for name, result in results.items():
             fact_count = len(result.get("records", []))
             print(f"\n[*] Interpreting '{name}' ({fact_count} fact(s) collected)...")
@@ -189,19 +185,19 @@ def main():
             else:
                 print(f"    -> interpretation failed: {task_result['validation']['issues'][0]}")
 
-    # Collapse any duplicate CVE ids across all the checks.
+    # Fold together any duplicate CVE ids across all the checks.
     audit_data["cves"] = sorted(set(audit_data["cves"]))
 
-    # --- Step 7: persist the full run log (JSON) as the audit trail ---
+    # Step 7: save the full run log (JSON) as the audit trail.
     log_path = report_writer.save_run_log(audit_data)
     print(f"\n[*] Run log saved to: {log_path}")
 
-    # --- Step 8: build the final PDF report ---
+    # Step 8: build the PDF report.
     report_writer.write_pdf_report(audit_data, args.output)
 
-    # --- Step 9: print a short console summary ---
+    # Step 9: print a short summary to the console.
     tasks = audit_data["tasks"]
-    completed = sum(1 for t in tasks if t["status"] == "completed")   # count how many checks finished
+    completed = sum(1 for t in tasks if t["status"] == "completed")   # how many checks finished
     incomplete = len(tasks) - completed
     print("\n[+] Audit complete.")
     print(f"    Target   : {args.target}")
@@ -213,16 +209,15 @@ def main():
     print(f"[*] PDF report saved to: {args.output}")
 
 
-"""This last bit only runs when you launch this file directly (like typing
-`python main.py`), not when some other file imports it. It's the program's
-actual "on" switch."""
+# This only runs when you launch the file directly (python main.py), not when another
+# file imports it. It's the actual on switch.
 if __name__ == "__main__":
-    """If anything goes wrong anywhere in main() - like the SSH connection failing
-    or the AI being unreachable - we catch it here so the user gets a clean error
-    message instead of a scary wall of technical text."""
+    # If anything blows up in main(), like the SSH connection failing or the AI being
+    # unreachable, we catch it here so the user gets a clean message instead of a scary
+    # wall of technical text.
     try:
         main()
-    except Exception as error:           # catch any normal error and give it the name "error"
+    except Exception as error:           # catch any normal error, call it "error"
         # [REQUIREMENT: Module sys] report on stderr, exit non-zero so callers know it failed.
         print(f"[FATAL] Audit aborted: {error}", file=sys.stderr)
         sys.exit(1)
