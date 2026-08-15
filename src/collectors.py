@@ -42,6 +42,38 @@ landed in a particular position."""
 _ADDRESS_PORT = re.compile(r"^(?P<address>.+):(?P<port>\d+|\*)$")
 
 
+"""Plain facts about what is normal, so the AI has context to judge against.
+These are DELIBERATELY just labels, not verdicts - our code doesn't decide "this
+is fine", it just tells the AI "this port is the standard SSH port" or "this
+binary is a stock part of the OS", and lets the AI weigh that. This is what stops
+ordinary SSH being ranked as a bigger threat than a real backdoor: the backdoor
+sits on an unrecognised port that isn't in this map, so it still stands out."""
+WELL_KNOWN_PORTS = {
+    22: "ssh", 25: "smtp", 53: "dns", 80: "http", 111: "rpcbind", 123: "ntp",
+    143: "imap", 443: "https", 465: "smtps", 587: "smtp-submission", 631: "cups",
+    993: "imaps", 995: "pop3s", 3306: "mysql", 5432: "postgresql", 6379: "redis",
+    8080: "http-alt", 8443: "https-alt",
+}
+
+"""The SUID binaries that ship as a normal part of Ubuntu. A SUID file NOT in this
+set is the interesting one; these are just the furniture. We match on the file
+name at the end of the path, since the directory can vary."""
+STANDARD_SUID = {
+    "sudo", "su", "passwd", "chsh", "chfn", "newgrp", "gpasswd", "sg",
+    "mount", "umount", "fusermount", "fusermount3", "pkexec", "ping", "ping6",
+    "mount.nfs", "ntfs-3g", "chage", "expiry", "ssh-keysign", "unix_chkpwd",
+    "dbus-daemon-launch-helper", "polkit-agent-helper-1", "snap-confine",
+}
+
+
+def _is_loopback(address):
+    """Is this address the machine talking to itself only? A service bound to
+    loopback (127.x or ::1) can't be reached from another machine, so it's a much
+    lower risk than the same service exposed on all interfaces."""
+    bare = address.strip("[]").lower()
+    return bare.startswith("127.") or bare == "::1" or "%lo" in address.lower()
+
+
 """[REQUIREMENT: Classes] A Collector bundles together the three things every
 check needs: the commands to run on the target, the function that makes sense
 of what came back, and a plain-English description for the report. Making this
@@ -139,10 +171,17 @@ def _parse_listening_ports(outputs):
         if process_match:
             process = process_match.group(1)
 
+        address = found.group("address")
+        port = int(found.group("port"))               # [REQUIREMENT: Casting] text -> number
         records.append({
-            "port": int(found.group("port")),          # [REQUIREMENT: Casting] text -> number
-            "address": found.group("address"),
+            "port": port,
+            "address": address,
             "process": process,                        # empty when we lack permission to see it
+            # Context for the AI to judge against, all computed by us so it's the
+            # same every run: what this port usually is, and whether it's only
+            # reachable from the machine itself.
+            "well_known_service": WELL_KNOWN_PORTS.get(port, ""),
+            "is_loopback": _is_loopback(address),
             "raw": line.strip(),                       # keep the original line as evidence
         })
 
@@ -256,8 +295,15 @@ def _parse_permissions(outputs):
             continue
         for line in stdout.splitlines():
             path = line.strip()
-            if path:
-                records.append({"kind": kind, "path": path})
+            if not path:
+                continue
+            record = {"kind": kind, "path": path}
+            if kind == "suid":
+                # Flag the stock OS binaries so the AI can tell an ordinary SUID
+                # file apart from an unexpected one that actually deserves a look.
+                basename = path.rsplit("/", 1)[-1]
+                record["is_standard"] = basename in STANDARD_SUID
+            records.append(record)
 
     return records, errors
 
