@@ -1,20 +1,35 @@
 """
 main.py is the starting point of the program. It doesn't do much work itself -
-instead it calls the six other files in the right order, kind of like a
-recipe that tells each helper when to do its job.
+instead it calls the other files in the right order, kind of like a recipe that
+tells each helper when to do its job.
+
+How the audit now works (Phase 3)
+---------------------------------
+The earlier version asked the AI to write a script for each check, validated the
+script, ran it on the target, and read whatever it printed. Testing showed the
+scripts were safe but frequently wrong: they misread command output, and two
+runs of the same audit disagreed with each other.
+
+So the flow changed. Now our own code (collectors.py) gathers the raw facts
+using fixed, read-only commands, and the AI's only job is to look at those facts
+and decide what is worth reporting. The facts are identical every run, so the
+findings stop drifting, and the AI is doing the part it is actually good at -
+judgement, not parsing.
+
+  collect profile -> run collector commands -> parse facts -> AI interprets facts -> report
 """
 
 import argparse   # a library that reads the options typed on the command line.
 import os          # [REQUIREMENT: Module os] os.environ reads the optional SSH password.
 import sys         # [REQUIREMENT: Module sys] sys.exit (process exit codes) + sys.stderr (error stream).
 
-# Bring in the six helper files. Each one has one job.
-import target_connector   # SSH: read info from / run scripts on the target
-import system_profile     # parse raw output into a clean dict
+# Bring in the helper files. Each one has one job.
+import target_connector   # SSH: read info from the target and run our collector commands
+import system_profile     # parse raw output into a clean profile dict
+import collectors         # our own deterministic fact-gathering (replaces AI-written scripts)
 import prompt_builder     # build the LLM prompts
 import ai_client          # send prompts to the LLM
-import validator          # safety-check generated scripts
-import report_writer      # save logs/scripts + write the PDF
+import report_writer      # save logs + write the PDF
 
 
 """[REQUIREMENT: Functions] The program is split into functions so that "reading the
@@ -31,6 +46,55 @@ def parse_args():
     parser.add_argument("--output", default="reports/audit_report.pdf", help="Path for the final PDF report")
     # This reads whatever the user typed and hands back a neat object with each option on it.
     return parser.parse_args()
+
+
+def _findings_from_reply(reply):
+    """Pull the list of findings out of the AI's interpretation reply, being
+    forgiving about the exact shape it comes back in. A well-behaved reply is
+    {"task": ..., "findings": [...]}, but we also accept a bare list, and treat
+    anything else as "no findings" rather than crashing."""
+    if isinstance(reply, dict) and isinstance(reply.get("findings"), list):
+        return reply["findings"]
+    if isinstance(reply, list):
+        return reply
+    return []
+
+
+def _interpret_one(profile, name, result):
+    """Ask the AI to interpret one collector's facts, and package the outcome in
+    the shape report_writer expects. Kept as its own function so a failure to
+    interpret one check (say the AI call times out) records that cleanly and the
+    rest of the audit carries on."""
+    system_prompt, user_prompt = prompt_builder.build_interpretation_prompt(profile, name, result)
+    try:
+        reply = ai_client.send(system_prompt, user_prompt)
+        findings = report_writer.normalize_findings(_findings_from_reply(reply))
+        status = "completed"
+        # Carry any coverage gaps the collector reported through to the report.
+        validation = {"approved": True, "issues": result.get("errors", []), "warnings": []}
+    except Exception as error:
+        """One interpretation failing shouldn't sink the whole run. We record it as
+        a not-completed task with the reason, and keep going."""
+        reply = {"error": str(error)}
+        findings = []
+        status = "failed_interpretation"
+        validation = {"approved": False, "issues": [f"AI interpretation failed: {error}"], "warnings": []}
+
+    # CVE ids gathered from this check's findings, de-duplicated and sorted.
+    cves = sorted({cve for finding in findings for cve in finding["cves"]})
+
+    return {
+        "task": name,
+        "system_prompt": system_prompt,
+        "user_prompt": user_prompt,
+        "ai_response": reply,
+        "collected_facts": result,        # the exact facts the findings are based on
+        "validation": validation,
+        "attempts": 1,
+        "status": status,
+        "findings": findings,
+        "cves": cves,
+    }
 
 
 def main():
@@ -51,9 +115,8 @@ def main():
 
     # If nothing came back, there's nothing to do, so stop here.
     if not raw_data:
-        """If something goes wrong, we want the program to clearly say so and
-        exit with an error status, so anything watching this program (like a
-        script or another tool) knows the run failed."""
+        """If something goes wrong, we want the program to clearly say so and exit
+        with an error status, so anything watching this program knows the run failed."""
         print("[ERROR] No system information collected from target.", file=sys.stderr)
         sys.exit(1)
 
@@ -62,8 +125,8 @@ def main():
     print(f"[*] System profile collected: {profile.get('os', 'unknown')} "
           f"/ {profile.get('arch', 'unknown')} ({profile.get('platform', 'unknown')})")
 
-    """This is where we build up everything we've learned during the audit, one
-    piece at a time, so we can hand it all to the report writer at the end."""
+    """This is where we build up everything we've learned during the audit, so we
+    can hand it all to the report writer at the end."""
     audit_data = {
         "target": args.target,
         "profile": profile,
@@ -72,94 +135,69 @@ def main():
         "cves": [],
     }
 
-    # --- Steps 3-7: process one audit task at a time ---
-    for task_key in prompt_builder.task_keys():      # go through each task name, one at a time
-        print(f"\n[*] Task '{task_key}': requesting audit script from local LLM...")
+    # --- Step 3: pick the collectors that suit this machine's operating system ---
+    platform = profile.get("platform", "linux")
+    active_collectors = collectors.for_platform(platform)
 
-        """This helper function asks the AI to write the script for this one
-        task. We define it fresh inside the loop so it always remembers which
-        task it's working on, even though the validator is the one that
-        actually calls it."""
-        def generate(feedback, _task_key=task_key):
-            system_prompt, user_prompt = prompt_builder.build_task_prompt(
-                profile, _task_key, feedback=feedback
-            )
-            if feedback:                             # only true when we're retrying
-                print(f"    retrying '{_task_key}' with validator feedback...")
-            # Bundle everything the validator needs to check into one package.
-            return {
-                "system_prompt": system_prompt,
-                "user_prompt": user_prompt,
-                "ai_response": ai_client.send(system_prompt, user_prompt),
-            }
-
-        # Hand the "generate" helper to the validator, which will call it, check the
-        # result, and retry if needed, then give us back the final outcome.
-        outcome = validator.validate_with_retries(generate)
-
-        # Keep a record of what happened for this task, for the report later.
-        task_result = {
-            "task": task_key,
-            "system_prompt": outcome["system_prompt"],
-            "user_prompt": outcome["user_prompt"],
-            "ai_response": outcome["ai_response"],
-            "validation": outcome["validation"],
-            "attempts": outcome["attempts"],
-            "status": "completed" if outcome["approved"] else "failed_validation",
-            "script_output": None,
-            "findings": [],
-            "cves": [],
-        }
-
-        # If the script never passed the safety check, note why and don't run it.
-        if not outcome["approved"]:
-            print(f"[!] Task '{task_key}' could not pass validation after "
-                  f"{outcome['attempts']} attempt(s); skipping execution.")
-            for issue in outcome["validation"]["issues"]:
-                print(f"    - {issue}")
-            audit_data["tasks"].append(task_result)  # still keep a record of the failed task
-            continue                                 # move on to the next task
-
-        # It passed the safety check: upload and run the script on the target, and grab its output.
-        print(f"[*] Task '{task_key}' approved on attempt {outcome['attempts']}. "
-              f"Executing on target...")
-        script_output = target_connector.execute_script(
+    if not active_collectors:
+        """We don't have collectors for this OS yet (Windows is still to come). We
+        still write a report so there's an artifact showing what was and wasn't done,
+        rather than failing silently."""
+        print(f"[!] No collectors available for platform '{platform}' yet; "
+              f"the profile was captured but no checks were run.")
+    else:
+        # --- Step 4: run every collector's commands over ONE SSH connection ---
+        commands = collectors.all_commands(active_collectors)
+        print(f"[*] Collecting facts over SSH ({len(active_collectors)} checks, "
+              f"{len(commands)} commands)...")
+        outputs = target_connector.run_commands(
             host=args.target,
             username=args.user,
-            script=outcome["ai_response"]["script"],
+            commands=commands,
             key_path=args.key,
             password=ssh_password,
         )
-        task_result["script_output"] = script_output
-        # Pull out the structured findings and CVE ids from what the script printed.
-        task_result["findings"] = report_writer.extract_findings(script_output)
-        task_result["cves"] = report_writer.extract_cves(script_output)
 
-        # Add this task's findings/CVEs onto the running totals for the whole audit.
-        audit_data["findings"].extend(task_result["findings"])
-        audit_data["cves"].extend(task_result["cves"])
-        audit_data["tasks"].append(task_result)      # keep this task's full record
+        # --- Step 5: parse the raw output into deterministic facts ---
+        results = collectors.collect_all(active_collectors, outputs)
 
-    # --- Step 8: persist the run log (JSON) and each generated script to disk ---
+        # --- Step 6: have the AI interpret each check's facts into findings ---
+        for name, result in results.items():
+            fact_count = len(result.get("records", []))
+            print(f"\n[*] Interpreting '{name}' ({fact_count} fact(s) collected)...")
+
+            task_result = _interpret_one(profile, name, result)
+
+            audit_data["findings"].extend(task_result["findings"])
+            audit_data["cves"].extend(task_result["cves"])
+            audit_data["tasks"].append(task_result)
+
+            gap_note = (f", {len(result['errors'])} coverage gap(s)"
+                        if result.get("errors") else "")
+            if task_result["status"] == "completed":
+                print(f"    -> {len(task_result['findings'])} finding(s){gap_note}")
+            else:
+                print(f"    -> interpretation failed: {task_result['validation']['issues'][0]}")
+
+    # Collapse any duplicate CVE ids across all the checks.
+    audit_data["cves"] = sorted(set(audit_data["cves"]))
+
+    # --- Step 7: persist the full run log (JSON) as the audit trail ---
     log_path = report_writer.save_run_log(audit_data)
-    script_paths = report_writer.save_generated_scripts(audit_data)
     print(f"\n[*] Run log saved to: {log_path}")
-    print(f"[*] Saved {len(script_paths)} generated script(s) to generated_scripts/")
 
-    # --- Step 9: build the final PDF report ---
+    # --- Step 8: build the final PDF report ---
     report_writer.write_pdf_report(audit_data, args.output)
 
-    # --- Step 10: print a short console summary ---
+    # --- Step 9: print a short console summary ---
     tasks = audit_data["tasks"]
-    # Count how many tasks ended up "completed".
-    completed = sum(1 for t in tasks if t["status"] == "completed")
+    completed = sum(1 for t in tasks if t["status"] == "completed")   # count how many checks finished
     incomplete = len(tasks) - completed
     print("\n[+] Audit complete.")
     print(f"    Target   : {args.target}")
     print(f"    OS       : {profile.get('os', 'unknown')} ({profile.get('platform', 'unknown')})")
-    # Only mention incomplete tasks if there actually were any.
-    print(f"    Tasks    : {completed}/{len(tasks)} completed"
-          + (f", {incomplete} could not be completed" if incomplete else ""))
+    print(f"    Checks   : {completed}/{len(tasks)} completed"
+          + (f", {incomplete} could not be interpreted" if incomplete else ""))
     print(f"    Findings : {len(audit_data['findings'])}")
     print(f"    CVEs     : {len(audit_data['cves'])}")
     print(f"[*] PDF report saved to: {args.output}")
@@ -169,9 +207,9 @@ def main():
 `python main.py`), not when some other file imports it. It's the program's
 actual "on" switch."""
 if __name__ == "__main__":
-    """If anything goes wrong anywhere in main() - like the SSH connection
-    failing or the AI being unreachable - we catch it here so the user gets a
-    clean error message instead of a scary wall of technical text."""
+    """If anything goes wrong anywhere in main() - like the SSH connection failing
+    or the AI being unreachable - we catch it here so the user gets a clean error
+    message instead of a scary wall of technical text."""
     try:
         main()
     except Exception as error:           # catch any normal error and give it the name "error"

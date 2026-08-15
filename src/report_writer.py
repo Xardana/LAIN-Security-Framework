@@ -88,8 +88,17 @@ def _normalize_finding(finding):
     }
 
 
+def normalize_findings(raw_findings):
+    """Clean a list of finding dictionaries into the exact shape the report
+    expects. The interpretation path hands us findings directly (the AI already
+    returned them as data), so this is the shared entry point both paths use to
+    make sure every finding has the right fields and safe defaults."""
+    return [_normalize_finding(f) for f in (raw_findings or []) if isinstance(f, dict)]
+
+
 def extract_findings(script_output):
-    """Pull the list of findings out of one task's output."""
+    """Pull the list of findings out of one task's output. Used by the older path
+    where the findings arrive as text a script printed, rather than as data."""
     text = _coerce_output(script_output)        # get the plain text
     data = _load_json(text)                     # try to read it as JSON
     if data is None:                            # couldn't read it as JSON
@@ -105,7 +114,7 @@ def extract_findings(script_output):
         })]
     # We got JSON. Grab the findings list (if it's actually there), and clean up each one.
     raw_findings = data.get("findings", []) if isinstance(data, dict) else []
-    return [_normalize_finding(f) for f in raw_findings if isinstance(f, dict)]
+    return normalize_findings(raw_findings)
 
 
 def extract_cves(script_output):
@@ -315,6 +324,18 @@ def _render_task(pdf, task):
 
     findings = task.get("findings", [])
     pdf.body(f"Status: completed on attempt {attempts}. {len(findings)} finding(s).")
+
+    """If the collector couldn't check something (usually because it needed root),
+    say so plainly. This is the honest replacement for the old behaviour of turning
+    a failed command into a fake finding - the gap is reported as a gap."""
+    facts = task.get("collected_facts") or {}
+    gaps = facts.get("errors") or []
+    if gaps:
+        pdf.set_font("Helvetica", "I", 9)
+        pdf.set_text_color(120, 90, 30)
+        pdf.multi_cell(0, 5, _safe("Coverage gaps (could not be checked): " + "; ".join(gaps)),
+                       new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+        pdf.set_text_color(20, 20, 20)
     pdf.ln(1)
 
     if not findings:                            # completed, but nothing worth flagging
@@ -368,8 +389,15 @@ def _render_appendix(pdf, audit_data):
         pdf.mono(json.dumps(task.get("ai_response", {}), indent=2)[:6000])
         pdf.body("Validation:", size=9)
         pdf.mono(json.dumps(task.get("validation", {}), indent=2)[:3000])
+        """The interpretation path records the exact facts the findings were based
+        on. Showing them here is what lets a reviewer trace every finding straight
+        back to real collected data, which is the whole point of the new approach."""
+        facts = task.get("collected_facts")
+        if facts is not None:
+            pdf.body("Collected facts (what the findings are based on):", size=9)
+            pdf.mono(json.dumps(facts, indent=2)[:6000])
         output = task.get("script_output")
-        if output is not None:                  # tells apart "ran but printed nothing" from "never ran"
+        if output is not None:                  # only present on the older script-based path
             pdf.body("Raw script output:", size=9)
             pdf.mono(json.dumps(output, indent=2)[:6000])
 
