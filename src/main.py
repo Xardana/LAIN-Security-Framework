@@ -44,6 +44,10 @@ def parse_args():
     parser.add_argument("--user", required=True, help="SSH username on target machine")
     parser.add_argument("--key", default=None, help="Path to SSH private key file (optional)")
     parser.add_argument("--output", default="reports/audit_report.pdf", help="Path for the final PDF report")
+    parser.add_argument(
+        "--depth", choices=["auto", "lightweight", "detailed"], default="auto",
+        help="How thorough to be. 'auto' (the default) decides from the target's own resources.",
+    )
     # This reads whatever the user typed and hands back a neat object with each option on it.
     return parser.parse_args()
 
@@ -125,11 +129,17 @@ def main():
     print(f"[*] System profile collected: {profile.get('os', 'unknown')} "
           f"/ {profile.get('arch', 'unknown')} ({profile.get('platform', 'unknown')})")
 
+    # --- Decide how deep to go: honour --depth, or let the profile decide ---
+    depth = args.depth if args.depth != "auto" else collectors.resource_tier(profile)
+    chosen_by = "set by --depth" if args.depth != "auto" else "chosen from target resources"
+    print(f"[*] Audit depth: {depth} ({chosen_by})")
+
     """This is where we build up everything we've learned during the audit, so we
     can hand it all to the report writer at the end."""
     audit_data = {
         "target": args.target,
         "profile": profile,
+        "depth": depth,
         "tasks": [],
         "findings": [],
         "cves": [],
@@ -146,8 +156,8 @@ def main():
         print(f"[!] No collectors available for platform '{platform}' yet; "
               f"the profile was captured but no checks were run.")
     else:
-        # --- Step 4: run every collector's commands over ONE SSH connection ---
-        commands = collectors.all_commands(active_collectors)
+        # --- Step 4: run every collector's commands (at the chosen depth) over ONE SSH connection ---
+        commands = collectors.all_commands(active_collectors, depth)
         print(f"[*] Collecting facts over SSH ({len(active_collectors)} checks, "
               f"{len(commands)} commands)...")
         outputs = target_connector.run_commands(
@@ -159,7 +169,7 @@ def main():
         )
 
         # --- Step 5: parse the raw output into deterministic facts ---
-        results = collectors.collect_all(active_collectors, outputs)
+        results = collectors.collect_all(active_collectors, outputs, depth)
 
         # --- Step 6: have the AI interpret each check's facts into findings ---
         for name, result in results.items():

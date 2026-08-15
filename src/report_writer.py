@@ -289,6 +289,10 @@ def _render_summary(pdf, audit_data):
     counts = _severity_counts(findings)
 
     pdf.h2("Summary")
+    depth = audit_data.get("depth")
+    if depth:
+        # Show how thorough this run was, since it adapts to the target's resources.
+        pdf.kv("Audit depth", depth)
     pdf.kv("Tasks completed", f"{completed} of {len(tasks)} attempted")
     if incomplete:                              # only show this row if some tasks failed
         pdf.kv("Not completed", f"{incomplete} (failed safety validation; see task sections)")

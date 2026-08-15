@@ -83,10 +83,27 @@ class Collector:
     def __init__(self, name, description, commands, parser):
         self.name = name                 # short id, e.g. "listening_ports"
         self.description = description    # what a human would call this check
-        self.commands = commands          # {label: shell command} - all read-only
+        """`commands` is normally a plain {label: shell command} dict. But it can
+        also be a function that takes the depth tier and returns such a dict - that
+        second form is how a check makes itself lighter or heavier depending on the
+        machine it's auditing."""
+        self._commands = commands
         self.parser = parser              # function that turns raw output into records
 
-    def collect(self, outputs):
+    def commands_for(self, tier="detailed"):
+        """The read-only commands to run at this depth. A fixed dict ignores the
+        tier; a callable gets to hand back a lighter or heavier set."""
+        if callable(self._commands):
+            return self._commands(tier)
+        return self._commands
+
+    @property
+    def commands(self):
+        """The default (full-depth) commands, kept so older callers that just read
+        `.commands` still work."""
+        return self.commands_for("detailed")
+
+    def collect(self, outputs, tier="detailed"):
         """Turn the raw command output into a tidy result.
 
         `outputs` is what the target gave us back: {label: {"stdout", "stderr",
@@ -97,7 +114,7 @@ class Collector:
         return {
             "collector": self.name,
             "description": self.description,
-            "commands": self.commands,
+            "commands": self.commands_for(tier),   # record what we actually ran at this depth
             "records": records,           # the actual facts we found
             "errors": errors,             # anything that went wrong, stated plainly
             # "ok" means we genuinely managed to look. It is NOT the same as
@@ -274,6 +291,25 @@ def _is_only_permission_noise(stderr):
     return all(any(phrase in line.lower() for phrase in harmless) for line in lines)
 
 
+def _permission_commands(tier):
+    """How wide to cast the net when hunting for risky files, chosen by depth.
+
+    On a low-resource machine we keep to the standard binary directories, which is
+    quick and cheap. On a capable machine we sweep the whole root filesystem. The
+    "-xdev" keeps that sweep on the one filesystem, so it never wanders off into
+    mounted drives or network shares, and the wider search is what would catch a
+    SUID binary hiding somewhere unusual like /opt or a user's home."""
+    if tier == "lightweight":
+        return {
+            "suid": "find /usr/bin /usr/sbin /bin /sbin -xdev -perm -4000 -type f",
+            "world_writable": "find /etc /usr/bin /usr/sbin -xdev -perm -0002 -type f",
+        }
+    return {
+        "suid": "find / -xdev -perm -4000 -type f",
+        "world_writable": "find /etc /usr /opt /var /srv -xdev -perm -0002 -type f",
+    }
+
+
 def _parse_permissions(outputs):
     """Find files with the SUID bit set, and files anyone can write to.
 
@@ -431,12 +467,10 @@ LINUX_COLLECTORS = {
     ),
     "weak_permissions": Collector(
         "weak_permissions", "Files with the SUID bit set, and world-writable files",
-        # Deliberately NOT hiding errors here. We need to see what find complained
-        # about to tell "there was nothing to find" apart from "find couldn't run".
-        {
-            "suid": "find /usr/bin /usr/sbin /bin /sbin -xdev -perm -4000 -type f",
-            "world_writable": "find /etc /usr/bin /usr/sbin -xdev -perm -0002 -type f",
-        },
+        # A function of the depth tier, not a fixed dict: the search widens on a
+        # capable machine and stays light on a constrained one. We also deliberately
+        # do NOT hide errors, so we can tell "nothing to find" from "find couldn't run".
+        _permission_commands,
         _parse_permissions,
     ),
     "firewall_status": Collector(
@@ -458,26 +492,63 @@ LINUX_COLLECTORS = {
 
 
 def for_platform(platform):
-    """Give back the collectors that suit this machine. Right now only Linux is
-    supported; Windows collectors are the next thing to add here, and keeping
-    this behind one function means nothing else has to change when they land."""
+    """Give back the collectors that suit this machine's operating system. Right
+    now only Linux is supported; Windows collectors are the next thing to add here,
+    and keeping this behind one function means nothing else has to change when they
+    land. This is the OS half of choosing what to run - the depth half is below."""
     if str(platform).lower().startswith("win"):
         return {}
     return LINUX_COLLECTORS
 
 
-def all_commands(collectors):
+def _memory_gib(profile):
+    """Read the machine's total memory out of the profile as a number of GiB, or
+    None if we can't tell. The profile stores it as text like "3.8Gi total, ...",
+    so we take the first value and convert whatever unit it carries."""
+    text = str(profile.get("memory", "")).strip()
+    if not text:
+        return None
+    token = text.split()[0]                            # e.g. "3.8Gi" or "512Mi"
+    match = re.match(r"([\d.]+)\s*([KMGT]?)", token, re.IGNORECASE)
+    if not match:
+        return None
+    try:
+        value = float(match.group(1))                  # [REQUIREMENT: Casting]
+    except ValueError:
+        return None
+    # How many of each unit make one GiB's worth.
+    per_gib = {"K": 1 / (1024 * 1024), "M": 1 / 1024, "G": 1, "T": 1024, "": 1}
+    return value * per_gib.get(match.group(2).upper(), 1)
+
+
+RESOURCE_TIER_MIN_GIB = 2.0    # below this much total RAM, keep the audit lightweight
+
+
+def resource_tier(profile):
+    """Decide how thorough to be, from what the machine can comfortably handle. A
+    small box gets a lighter audit so we don't hammer it; a capable one gets the
+    full sweep. This reads ONLY the profile, so the same machine always gets the
+    same decision, and changing the profile's memory figure changes the outcome."""
+    gib = _memory_gib(profile)
+    # If we couldn't read the memory at all, err on the side of gentle.
+    if gib is None or gib < RESOURCE_TIER_MIN_GIB:
+        return "lightweight"
+    return "detailed"
+
+
+def all_commands(collectors, tier="detailed"):
     """Flatten every collector's commands into one batch, so the whole audit can
-    run over a single SSH connection instead of opening a new one per check.
-    Labels are prefixed with the collector name to keep them apart."""
+    run over a single SSH connection instead of opening a new one per check. The
+    tier is passed through so each check runs at the chosen depth. Labels are
+    prefixed with the collector name to keep them apart."""
     commands = {}
     for name, collector in collectors.items():
-        for label, command in collector.commands.items():
+        for label, command in collector.commands_for(tier).items():
             commands[f"{name}.{label}"] = command
     return commands
 
 
-def collect_all(collectors, outputs):
+def collect_all(collectors, outputs, tier="detailed"):
     """Run every collector's parser over the command output and return one
     result per collector, keyed by name."""
     results = {}
@@ -488,5 +559,5 @@ def collect_all(collectors, outputs):
             for label, value in outputs.items()
             if label.startswith(f"{name}.")
         }
-        results[name] = collector.collect(mine)
+        results[name] = collector.collect(mine, tier)
     return results
